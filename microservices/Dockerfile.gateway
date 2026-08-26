@@ -1,0 +1,9 @@
+# 注意：本 Dockerfile 依赖本地已 mvn package 打好的 jar 包（使用 build-jars.ps1 或手动执行下面命令）
+#   mvn -pl geo-gateway -am -DskipTests package
+# 如果还无法拉取 eclipse-temurin:17-jre，请先配置 Docker 国内镜像加速（参考 README 说明）
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY geo-gateway/target/geo-gateway.jar app.jar
+ENV JAVA_OPTS="-Xmx512m"
+EXPOSE 8080
+ENTRYPOINT ["sh","-c","java $JAVA_OPTS -jar app.jar"]

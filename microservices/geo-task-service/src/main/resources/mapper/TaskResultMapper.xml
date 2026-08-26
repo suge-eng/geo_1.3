@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.geo.mapper.TaskResultMapper">
+
+    <select id="selectByTaskNo" resultType="com.geo.entity.TaskResult">
+        SELECT * FROM task_result WHERE task_no = #{taskNo} ORDER BY id
+    </select>
+
+    <select id="selectByTaskId" resultType="com.geo.entity.TaskResult">
+        SELECT * FROM task_result WHERE task_id = #{taskId} ORDER BY id
+    </select>
+
+    <select id="selectByStatus" resultType="com.geo.entity.TaskResult">
+        SELECT * FROM task_result WHERE status = #{status}
+    </select>
+
+</mapper>

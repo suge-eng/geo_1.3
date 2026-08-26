@@ -1,0 +1,61 @@
+server:
+  address: 0.0.0.0
+  port: 8081
+  connection-timeout: 600s
+  forward-headers-strategy: framework
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml
+    min-response-size: 1024
+  tomcat:
+    keep-alive-timeout: 600s
+    max-keep-alive-requests: -1
+    max-threads: 200
+    accept-count: 1000
+
+spring:
+  application:
+    name: geo-task-service
+  mvc:
+    async:
+      request-timeout: 600000
+
+  datasource:
+    url: jdbc:mysql://localhost:3307/geo_backend?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: geo
+    password: geo123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      password: redis123
+      timeout: 10s
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      table-underline: true
+  mapper-locations: classpath*:mapper/**/*.xml
+
+geo:
+  rpa:
+    url: http://localhost:8084/internal/rpa/dispatch
+  task:
+    timeout:
+      check-interval-seconds: 30
+      timeout-minutes: 720
+
+logging:
+  level:
+    com.geo: DEBUG

@@ -1,0 +1,90 @@
+server:
+  address: 0.0.0.0
+  port: 8084
+  connection-timeout: 600s
+  forward-headers-strategy: framework
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml
+    min-response-size: 1024
+  tomcat:
+    keep-alive-timeout: 600s
+    max-keep-alive-requests: -1
+    max-threads: 200
+    accept-count: 1000
+    remoteip:
+      remote-ip-header: X-Forwarded-For
+      protocol-header: X-Forwarded-Proto
+      host-header: X-Forwarded-Host
+      port-header: X-Forwarded-Port
+
+spring:
+  application:
+    name: geo-rpa-service
+  mvc:
+    async:
+      request-timeout: 600000
+
+  datasource:
+    url: jdbc:mysql://localhost:3307/geo_backend?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: geo
+    password: geo123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      password: redis123
+      timeout: 10s
+
+  rabbitmq:
+    host: localhost
+    port: 5673
+    username: geo
+    password: geo123
+    virtual-host: /
+    connection-timeout: 10s
+    listener:
+      simple:
+        acknowledge-mode: auto
+        concurrency: 5
+        max-concurrency: 10
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 1000ms
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      table-underline: true
+  mapper-locations: classpath*:mapper/**/*.xml
+
+minio:
+  endpoint: http://localhost:9002
+  access-key: minioadmin
+  secret-key: minioadmin123
+  bucket: geo-bucket
+  public-endpoint: http://172.27.64.1:9002
+
+logging:
+  level:
+    com.geo: DEBUG
+    org.springframework.amqp: INFO
+
+geo:
+  rpa:
+    max-retry-count: 10
+    request-timeout-ms: 120000
+    rate-limit:
+      max-requests-per-minute: 60

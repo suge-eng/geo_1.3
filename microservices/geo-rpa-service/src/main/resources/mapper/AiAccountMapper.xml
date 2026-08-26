@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.geo.mapper.AiAccountMapper">
+
+    <select id="selectAvailableAccounts" resultType="com.geo.entity.AiAccount">
+        SELECT * FROM ai_account 
+        WHERE platform = #{platform} 
+          AND status = 'ACTIVE' 
+          AND (cooldown_until IS NULL OR cooldown_until &lt; NOW())
+        ORDER BY priority DESC, daily_used ASC
+    </select>
+
+    <select id="selectBestAccount" resultType="com.geo.entity.AiAccount">
+        SELECT * FROM ai_account 
+        WHERE platform = #{platform} 
+          AND status = 'ACTIVE' 
+          AND (cooldown_until IS NULL OR cooldown_until &lt; NOW())
+          AND daily_used &lt; daily_limit
+          AND consecutive_failures &lt; max_consecutive_failures
+        ORDER BY priority DESC, daily_used ASC, last_request_at ASC
+        LIMIT 1
+    </select>
+
+</mapper>

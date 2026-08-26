@@ -1,0 +1,29 @@
+server:
+  port: 8083
+  address: 0.0.0.0
+  forward-headers-strategy: framework
+
+spring:
+  application:
+    name: geo-file-service
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+minio:
+  endpoint: http://localhost:9002
+  access-key: minioadmin
+  secret-key: minioadmin123
+  bucket: geo-bucket
+  public-endpoint: http://172.27.64.1:9002
+
+logging:
+  level:
+    com.geo: DEBUG

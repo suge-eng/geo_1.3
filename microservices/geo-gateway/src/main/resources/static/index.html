@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI任务调度平台</title>
+    <script src="lib/vue.global.prod.js?v=20260826_handoff_v5"></script>
+    <script src="lib/axios.min.js?v=20260826_handoff_v5"></script>
+    <script src="lib/echarts.min.js?v=20260826_handoff_v5"></script>
+    <link rel="stylesheet" href="css/style.css?v=20260826_handoff_v5">
+</head>
+<body>
+    <div id="app" class="container">
+        <!-- 头部搜索 -->
+        <div class="header-bar">
+            <h1>观测配置</h1>
+            <div class="search-area">
+                <input v-model="searchKeyword" type="text" placeholder="输入项目名称">
+                <button @click="searchTasks" class="btn btn-secondary">搜索</button>
+                <button @click="activeTab = 'submit'; currentView = 'list'" class="btn btn-primary">+ 新建局部观测</button>
+            </div>
+        </div>
+
+        <!-- 标签切换 -->
+        <div class="tabs page-tabs">
+            <div :class="activeTab === 'submit' ? 'tab active' : 'tab'" @click="activeTab = 'submit'; currentView = 'list'">提交任务</div>
+            <div :class="activeTab === 'list' ? 'tab active' : 'tab'" @click="activeTab = 'list'; currentView = 'list'; loadTaskList()">任务列表</div>
+        </div>
+
+        <!-- 提交任务表单 -->
+        <div v-if="activeTab === 'submit'" class="card create-card">
+            <div class="card-header">
+                <h2 class="card-title">新建任务</h2>
+            </div>
+
+            <div class="tabs mode-tabs">
+                <div :class="submitMode === 'manual' ? 'tab active' : 'tab'" @click="submitMode = 'manual'">手动输入</div>
+                <div :class="submitMode === 'excel' ? 'tab active' : 'tab'" @click="submitMode = 'excel'">Excel上传</div>
+            </div>
+
+            <div class="form-group">
+                <label>项目名称 <span style="color: #dc3545;">*</span></label>
+                <input v-model="taskForm.title" type="text" placeholder="输入项目名称">
+            </div>
+
+            <div class="form-group">
+                <label>AI平台 <span style="color: #dc3545;">*</span></label>
+                <div class="platforms-container">
+                    <label v-for="platform in aiPlatforms" :key="platform.value" class="platform-chip" :class="taskForm.aiPlatforms.includes(platform.value) ? 'selected' : ''">
+                        <input type="checkbox" :value="platform.value" v-model="taskForm.aiPlatforms" class="sr-only">
+                        {{ platform.label }}
+                    </label>
+                </div>
+            </div>
+
+            <!-- 手动输入模式 -->
+            <div v-if="submitMode === 'manual'" class="form-group">
+                <label>询问句 <span style="color: #dc3545;">*</span></label>
+                <textarea v-model="taskForm.questionsText" placeholder="每行一个问题"></textarea>
+            </div>
+
+            <!-- Excel上传模式 -->
+            <div v-if="submitMode === 'excel'" class="form-group">
+                <label>上传Excel文件 <span style="color: #dc3545;">*</span></label>
+                <div 
+                    class="upload-area"
+                    :class="{ 'dragover': isDragOver }"
+                    @click="triggerFileInput"
+                    @dragover.prevent="isDragOver = true"
+                    @dragleave.prevent="isDragOver = false"
+                    @drop.prevent="handleDrop"
+                >
+                    <div class="upload-icon">📊</div>
+                    <div class="upload-text">点击或拖拽Excel文件到此处上传</div>
+                    <div class="upload-hint">支持 .xlsx 和 .xls 格式，第一列为问题（第一行为表头）</div>
+                    <div v-if="selectedFile" class="upload-file-info">
+                        📁 {{ selectedFile.name }} ({{ formatFileSize(selectedFile.size) }})
+                    </div>
+                </div>
+                <input 
+                    ref="fileInput"
+                    type="file" 
+                    accept=".xlsx,.xls" 
+                    style="display: none;"
+                    @change="handleFileSelect"
+                >
+                <div style="margin-top: 10px;">
+                    <a href="/api/task/excel-template" style="display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: #667eea; text-decoration: none; cursor: pointer; padding: 6px 12px; border: 1px solid #667eea; border-radius: 6px; transition: all 0.2s;" onmouseover="this.style.background='#667eea'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#667eea'">
+                        📥 下载Excel模板
+                    </a>
+                </div>
+            </div>
+
+            <div class="flex-row">
+                <div class="form-group">
+                    <label>自主品牌名 <span style="color: #dc3545;">*</span></label>
+                    <input v-model="taskForm.brandName" type="text" placeholder="输入品牌名">
+                </div>
+                <div class="form-group">
+                    <label>单品</label>
+                    <input v-model="taskForm.productName" type="text" placeholder="可填可不填">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>竞争对手品牌名 (最多5个)</label>
+                <div class="competitors-container">
+                    <input v-for="i in 5" :key="i" v-model="taskForm.competitors[i-1]" type="text" placeholder="竞争对手">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>执行频次</label>
+                <div class="platforms-container">
+                    <label v-for="freq in frequencies" :key="freq.value" class="platform-chip" :class="taskForm.executionFrequency === freq.value ? 'selected' : ''">
+                        <input type="radio" :value="freq.value" v-model="taskForm.executionFrequency" class="sr-only">
+                        {{ freq.label }}
+                    </label>
+                </div>
+            </div>
+
+            <button @click="createTask" :disabled="!canSubmit" class="btn btn-primary">
+                {{ isSubmitting ? '创建中...' : '创建任务' }}
+            </button>
+            <button v-if="submitMode === 'excel' && selectedFile" @click="clearFile" class="btn btn-secondary" style="margin-left: 10px;">
+                清除文件
+            </button>
+        </div>
+
+        <!-- 任务列表 -->
+        <section v-if="activeTab === 'list' && currentView === 'list'" class="task-list-view">
+            <div class="task-grid">
+                <article 
+                    v-for="task in taskList" 
+                    :key="task.taskNo" 
+                    class="task-card"
+                    :class="{ 
+                        'local': task.scope === 'LOCAL',
+                        'global': task.scope === 'GLOBAL'
+                    }"
+                >
+                    <div class="task-card-header">
+                        <div class="task-title-line">
+                            <span v-if="task.scope === 'LOCAL'" class="scope-badge local">局部</span>
+                            <span v-if="task.scope === 'GLOBAL'" class="scope-badge global">全局</span>
+                            <span class="task-card-title" :title="task.title || '未命名任务'">{{ task.title || '未命名任务' }}</span>
+                        </div>
+                        <div class="task-card-actions">
+                            <button class="task-icon-button edit" title="编辑" aria-label="编辑任务">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M4 20h4.2L19 9.2a2.1 2.1 0 0 0 0-3L17.8 5a2.1 2.1 0 0 0-3 0L4 15.8V20Z"></path>
+                                    <path d="m13.7 6.1 4.2 4.2M4 20h16"></path>
+                                </svg>
+                            </button>
+                            <button 
+                                class="task-icon-button delete"
+                                title="删除" 
+                                aria-label="删除任务"
+                                v-if="task.status === 'PENDING' || task.status === 'COMPLETED' || task.status === 'FAILED' || task.status === 'PARTIAL_FAILED'"
+                                @click="deleteTask(task)"
+                            >
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M4 7h16M9 7V4h6v3M6.5 7l1 13h9l1-13M10 11v5M14 11v5"></path>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="task-progress-line">
+                        <div class="task-card-progress">
+                            <div 
+                                class="task-card-progress-fill" 
+                                :class="{ completed: task.status === 'COMPLETED' }"
+                                :style="{ width: (task.totalCount > 0 ? task.completedCount / task.totalCount * 100 : 0) + '%' }"
+                            ></div>
+                        </div>
+                        <strong>{{ task.totalCount > 0 ? Math.round(task.completedCount / task.totalCount * 100) : 0 }}%</strong>
+                        <span :class="getStatusClass(task.status)" class="status-badge">{{ getStatusText(task.status) }}</span>
+                    </div>
+
+                    <div class="task-count">
+                        {{ task.completedCount }}/{{ task.totalCount }}
+                    </div>
+
+                    <div class="task-card-meta">
+                        <div class="task-card-meta-row">
+                            <span>意图词/询问句</span>
+                            <span>{{ task.intentCount || 0 }}/{{ task.questionCount || 0 }}</span>
+                        </div>
+                        <div class="task-card-meta-row">
+                            <span>频次</span>
+                            <span>{{ getFrequencyText(task.executionFrequency) }}</span>
+                        </div>
+                        <div class="task-card-meta-row">
+                            <span>下一次开始时间</span>
+                            <span>{{ task.nextRunTime || '-' }}</span>
+                        </div>
+                    </div>
+
+                    <div class="task-card-footer">
+                        <button v-if="task.status === 'PENDING'" @click="submitTask(task)" class="btn btn-submit">
+                            提交任务
+                        </button>
+                        <button v-if="task.status === 'COMPLETED'" @click="submitTaskAgain(task)" class="btn btn-submit">
+                            重新提交
+                        </button>
+                        <button v-if="task.status === 'RUNNING' || task.status === 'PROCESSING'" @click="stopTask(task)" class="btn btn-stop">
+                            终止任务
+                        </button>
+                        <button v-if="task.status === 'COMPLETED'" @click="openReportHistory(task)" class="btn btn-history">
+                            历史报告
+                        </button>
+                        <button @click="selectTask(task)" class="btn btn-details">
+                            查看详情
+                        </button>
+                    </div>
+                </article>
+            </div>
+
+            <div v-if="taskList.length === 0" class="empty-state">
+                <div>暂无任务</div>
+            </div>
+        </section>
+
+        <!-- 任务详情 -->
+        <div v-if="currentView === 'detail'" class="card detail-card detail-state">
+            <div class="detail-header">
+                <div class="detail-heading">
+                    <div class="detail-title-line">
+                        <h2 class="card-title">{{ selectedTask.title }}</h2>
+                        <span :class="['detail-scope-badge', selectedTask.scope === 'GLOBAL' ? 'global' : 'local']">{{ selectedTask.scope === 'GLOBAL' ? '全局观测' : '局部观测' }}</span>
+                        <span class="detail-observe-meta">基于{{ selectedTask.questionCount || 0 }}个查询词 / {{ selectedTask.totalCount || 0 }}次访问进行观测&nbsp;|&nbsp;数据更新：{{ selectedTask.nextRunTime || '-' }}</span>
+                    </div>
+                    <span class="detail-task-no">任务号: {{ selectedTask.taskNo }}</span>
+                </div>
+                <div class="detail-header-actions">
+                    <button @click="openReportHistory(selectedTask)" class="detail-history-button">历史报告 <span>⌄</span></button>
+                    <button @click="closeDetail" class="detail-close-button">关闭</button>
+                </div>
+            </div>
+
+            <div class="detail-tabbar">
+                <div class="detail-tabs">
+                    <button v-if="selectedTask.status === 'COMPLETED' || selectedTask.status === 'PARTIAL_FAILED'" @click="openReport">数据报告</button>
+                    <button class="active">观测详情</button>
+                </div>
+                <button class="detail-share" @click="copyDetailLink">↗ 分享</button>
+            </div>
+
+            <div class="detail-progress-bar">
+                <div 
+                    class="detail-progress-fill"
+                    :style="{ width: progress.percentage + '%' }"
+                ></div>
+            </div>
+
+            <div class="detail-progress-meta">
+                进度: {{ progress.percentage }}% ({{ progress.completed }}/{{ progress.total }})
+                <span v-if="progress.failed > 0">失败: {{ progress.failed }}</span>
+            </div>
+
+            <div class="detail-filterbar">
+                <label class="detail-searchbox">
+                    <input v-model="detailKeyword" type="search" placeholder="请输入关键词搜索">
+                    <span>⌕</span>
+                </label>
+                <label class="detail-filter-item"><span>层级</span><select v-model="detailLevel"><option value="ALL">全部</option><option value="L1">L1</option><option value="L2">L2</option><option value="L3">L3</option><option value="L4">L4</option><option value="L5">L5</option></select></label>
+                <label class="detail-filter-item"><span>展现</span><select v-model="detailVisibility"><option value="ALL">请选择</option><option value="SUCCESS">已展现</option><option value="FAILED">未展现</option></select></label>
+                <label class="detail-filter-item"><span>舆情</span><select v-model="detailSentiment"><option value="ALL">全部</option><option value="positive">正面</option><option value="negative">负面</option><option value="none">未提及</option><option value="neutral">中性</option></select></label>
+                <label class="detail-filter-item"><span>平台</span><select v-model="detailPlatform"><option value="ALL">请选择</option><option v-for="platform in aiPlatforms" :key="platform.value" :value="platform.label">{{ platform.label }}</option></select></label>
+                <label class="detail-filter-item"><span>查询状态</span><select v-model="detailStatus"><option value="ALL">请选择</option><option value="SUCCESS">已完成</option><option value="PENDING">待开始</option><option value="RUNNING">执行中</option><option value="FAILED">失败</option></select></label>
+                <button class="detail-query-button">查询</button>
+                <div class="detail-toolbar-actions">
+                    <button @click="exportDetailCsv(false)">导出详情</button>
+                    <button @click="exportDetailCsv(true)">导出联网记录</button>
+                    <button @click="retryAllTasks">重新执行</button>
+                    <button @click="batchDeleteResults" :disabled="selectedResultIds.length === 0" class="btn-danger">删除选中</button>
+                </div>
+            </div>
+
+            <div class="detail-table-wrap">
+            <table class="results-table">
+                <thead>
+                    <tr>
+                        <th style="width: 30px;"><input type="checkbox" :checked="allFilteredResultsSelected" :indeterminate="someFilteredResultsSelected && !allFilteredResultsSelected" @change="toggleSelectAllFiltered($event.target.checked)" aria-label="全选当前筛选结果"></th>
+                        <th>询问句</th>
+                        <th>层级</th>
+                        <th>标签</th>
+                        <th>意图词</th>
+                        <th>展现</th>
+                        <th>品牌</th>
+                        <th>舆情</th>
+                        <th>平台</th>
+                        <th>查询时间</th>
+                        <th>查询状态</th>
+                        <th>查询结果</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-for="result in filteredTaskResults" :key="result.id">
+                        <td><input type="checkbox" v-model="selectedResultIds" :value="result.id" :aria-label="'选择询问句：' + result.questionText"></td>
+                        <td style="max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="result.questionText">{{ result.questionText }}</td>
+                        <td>{{ result.level || '-' }}</td>
+                        <td>{{ result.tag || '-' }}</td>
+                        <td>{{ result.intentWord || '-' }}</td>
+                        <td>
+                            <span v-if="result.showStatus === 'SUCCESS'" style="color: #28a745;">✓</span>
+                            <span v-else style="color: #dc3545;">✗</span>
+                        </td>
+                        <td>{{ result.brand || '-' }}</td>
+                        <td>
+                            <span 
+                                v-if="result.sentiment === 'positive'" 
+                                style="color: #28a745;">●</span>
+                            <span 
+                                v-else-if="result.sentiment === 'negative'" 
+                                style="color: #dc3545;">●</span>
+                            <span 
+                                v-else 
+                                style="color: #adb5bd;">●</span>
+                        </td>
+                        <td>{{ result.aiDisplayName || '-' }}</td>
+                        <td>{{ result.queryTime || '-' }}</td>
+                        <td>
+                            <span :class="getQueryStatusClass(result.status)" class="query-status">
+                                {{ getQueryStatusText(result.status) }}
+                            </span>
+                        </td>
+                        <td class="action-links">
+                            <a v-if="result.status === 'SUCCESS'" href="#" @click.prevent="openQAModal(result)">问答</a>
+                            <a v-if="result.status === 'SUCCESS'" href="#" @click.prevent="openRankingModal(result)">排名</a>
+                            <a v-if="result.screenshotUrls && result.screenshotUrls.length > 0" href="#" @click.prevent="openScreenshotModal(result)">截图</a>
+                        </td>
+                        <td class="action-links">
+                            <a href="#" @click.prevent="openNetworkModal(result)">联网记录</a>
+                            <a href="#" @click.prevent="retrySingleResult(result.id)">重新执行</a>
+                            <a v-if="result.status !== 'RUNNING'" href="#" style="color:#dc3545;" @click.prevent="deleteSingleResult(result.id, result.questionText)">删除</a>
+                            <a v-else style="color:#adb5bd;cursor:not-allowed;opacity:0.5;" title="执行中无法删除">删除</a>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+
+            <div v-if="filteredTaskResults.length === 0" class="empty-state">
+                <div>{{ taskResults.length === 0 ? '任务处理中...' : '暂无符合筛选条件的数据' }}</div>
+            </div>
+
+            <div class="detail-pagination" v-if="filteredTaskResults.length > 0">
+                <button>‹</button>
+                <button class="active">1</button>
+                <button>2</button>
+                <button>3</button>
+                <button>4</button>
+                <button>5</button>
+                <button>›</button>
+                <select><option>20条/页</option></select>
+                <span>跳至</span><input value="1" aria-label="跳转页码"><span>页</span>
+            </div>
+        </div>
+
+        <!-- 历史报告列表页面 -->
+        <div v-if="currentView === 'reportHistory'" class="report-page">
+            <div class="report-header">
+                <div>
+                    <div class="report-title">
+                        <span class="brand-highlight">{{ reportHistoryTask ? reportHistoryTask.title : '' }}</span>
+                        <span>历史数据报告</span>
+                    </div>
+                    <div class="report-meta">
+                        任务编号: {{ reportHistoryTask ? reportHistoryTask.taskNo : '' }} | 共 {{ reportHistoryList.length }} 份报告
+                    </div>
+                </div>
+                <div class="report-actions">
+                    <button class="btn btn-global-report" @click="openGlobalReport" :disabled="reportLoading || reportHistoryLoading || reportHistoryList.length === 0">
+                        全局数据报告
+                    </button>
+                    <button class="btn btn-primary" @click="generateReportFromHistory" :disabled="reportLoading">
+                        {{ reportLoading ? '生成中...' : '生成报告' }}
+                    </button>
+                    <button class="btn btn-secondary" @click="closeReportHistory">返回</button>
+                </div>
+            </div>
+
+            <div v-if="reportHistoryLoading" class="report-loading">
+                <div class="spinner"></div>
+                <span>正在加载历史报告...</span>
+            </div>
+
+            <div v-else-if="reportHistoryList.length === 0" class="empty-state report-history-empty">
+                <div>暂无历史报告</div>
+                <button class="btn btn-primary" @click="generateReportFromHistory">生成第一份报告</button>
+            </div>
+
+            <div v-else class="report-history-list">
+                <div 
+                    v-for="(report, idx) in reportHistoryList" 
+                    :key="report.id" 
+                    class="report-history-item"
+                    @click="viewReportById(report)"
+                >
+                    <div class="report-history-date">
+                        <div class="report-history-date-day">{{ formatReportDate(report.reportDate).split(' ')[0] }}</div>
+                        <div class="report-history-date-time">{{ formatReportDate(report.reportDate).split(' ')[1] || '' }}</div>
+                    </div>
+                    <div class="report-history-info">
+                        <div class="report-history-title">
+                            {{ report.title || '数据分析报告' }}
+                            <span v-if="idx === 0" class="report-history-latest">最新</span>
+                        </div>
+                        <div class="report-history-meta">
+                            品牌: {{ report.brandName || '-' }} | 问题: {{ report.totalQuestions || 0 }} | 平台: {{ report.totalPlatforms || 0 }} | 成功: {{ report.completedResults || 0 }}/{{ report.totalResults || 0 }}
+                        </div>
+                        <div class="report-history-metrics" v-if="report.coverageRate !== undefined">
+                            <span class="metric-chip">覆盖率 <b>{{ report.coverageRate.toFixed(1) }}%</b></span>
+                            <span class="metric-chip">首位率 <b>{{ report.firstRate.toFixed(1) }}%</b></span>
+                            <span class="metric-chip">前三率 <b>{{ report.top3Rate.toFixed(1) }}%</b></span>
+                            <span class="metric-chip">前五率 <b>{{ report.top5Rate.toFixed(1) }}%</b></span>
+                        </div>
+                    </div>
+                    <div class="report-history-action">
+                        <span class="btn btn-primary" style="padding: 6px 16px; font-size: 13px;">查看详情</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 数据报告页面 -->
+        <div v-if="currentView === 'report'" class="report-page report-workspace-page">
+            <div class="detail-header report-context-header">
+                <div class="detail-heading">
+                    <div class="detail-title-line">
+                        <h2 class="card-title">{{ selectedTask ? selectedTask.title : (reportData.title || '数据报告') }}</h2>
+                        <span v-if="selectedTask" :class="['detail-scope-badge', selectedTask.scope === 'GLOBAL' ? 'global' : 'local']">{{ selectedTask.scope === 'GLOBAL' ? '全局观测' : '局部观测' }}</span>
+                        <span v-if="isGlobalReport" class="report-mode-badge">全局数据报告</span>
+                        <span v-if="selectedTask && !isGlobalReport" class="detail-observe-meta">基于{{ selectedTask.questionCount || 0 }}个查询词 / {{ selectedTask.totalCount || 0 }}次访问进行观测</span>
+                        <span v-else-if="isGlobalReport" class="detail-observe-meta">汇总{{ reportData.historyReportCount || 0 }}份历史报告</span>
+                    </div>
+                </div>
+                <div class="detail-header-actions">
+                    <button v-if="selectedTask" @click="openReportHistory(selectedTask)" class="detail-history-button">历史报告 <span>⌄</span></button>
+                    <button @click="closeDetail" class="detail-close-button">关闭</button>
+                </div>
+            </div>
+
+            <div class="detail-tabbar report-context-tabbar">
+                <div class="detail-tabs">
+                    <button class="active">数据报告</button>
+                    <button @click="switchToObservationDetail">观测详情</button>
+                </div>
+                <button class="detail-share" @click="copyDetailLink">↗ 分享</button>
+            </div>
+
+            <div v-if="reportLoading" class="report-loading">
+                <div class="spinner"></div>
+                <span>正在生成数据报告...</span>
+            </div>
+            <div v-else>
+                <div class="report-header">
+                    <div>
+                        <div class="report-title">
+                            <span class="brand-highlight">{{ reportData.brandName || '品牌' }}</span>
+                            <span>{{ isGlobalReport ? '全局数据分析报告' : '数据分析报告' }}</span>
+                        </div>
+                        <div v-if="!isGlobalReport" class="report-meta">
+                            任务编号: {{ reportData.taskNo }} · 共 {{ reportData.totalQuestions || 0 }} 个问题 · {{ reportData.totalPlatforms || 0 }} 个平台 · 成功 {{ reportData.completedResults || 0 }}/{{ reportData.totalResults || 0 }}
+                        </div>
+                        <div v-else class="report-meta">
+                            任务编号: {{ reportData.taskNo }} · 汇总 {{ reportData.historyReportCount || 0 }} 份历史报告 · 统计范围 {{ formatReportDate(reportData.rangeStart).split(' ')[0] }} 至 {{ formatReportDate(reportData.rangeEnd).split(' ')[0] }} · 累计成功 {{ reportData.completedResults || 0 }}/{{ reportData.totalResults || 0 }}
+                        </div>
+                    </div>
+                    <div class="report-actions">
+                        <button v-if="isGlobalReport" class="btn btn-primary" @click="openGlobalReport">重新汇总</button>
+                        <button v-else-if="!reportHistoryTask" class="btn btn-primary" @click="regenerateReport">重新生成</button>
+                    </div>
+                </div>
+
+                <!-- 竞争力总览 -->
+                <div class="competition-dashboard">
+                    <section class="competition-panel score-panel">
+                        <div class="competition-panel-title"><span>∿</span> 综合竞争力得分 <i>?</i></div>
+                        <div id="overallScoreChart" class="competition-chart score-chart"></div>
+                    </section>
+                    <section class="competition-panel comparison-panel">
+                        <div class="competition-panel-title"><span>∿</span> 品牌曝光对比 <i>?</i><select v-model="comparisonPlatform" @change="handleReportPlatformChange"><option v-for="platform in reportPlatformOptions" :key="platform.value" :value="platform.value">{{ platform.label }}</option></select></div>
+                        <div v-if="comparisonCompetition.platformDataMissing" class="report-platform-empty">该平台统计数据待后端返回</div>
+                        <div v-else class="compact-brand-table-wrap">
+                            <table class="compact-brand-table">
+                                <thead><tr><th>维度</th><th v-for="brand in (comparisonCompetition.brands || [])" :key="brand.name"><b>{{ brand.rank }}</b> {{ brand.name }}</th></tr></thead>
+                                <tbody><tr v-for="row in (comparisonCompetition.metrics || [])" :key="row.label"><td>{{ row.label }}</td><td v-for="(value, index) in (row.values || [])" :key="row.label + '-' + index">{{ value }}</td></tr></tbody>
+                            </table>
+                        </div>
+                    </section>
+                    <section class="competition-panel brand-exposure-panel">
+                        <div class="competition-panel-title"><span>∿</span> 品牌曝光率 <i>?</i></div>
+                        <div class="brand-exposure-summary">
+                            <div class="brand-exposure-count-block">
+                                <span>品牌提及</span>
+                                <strong>{{ (reportData.exposureMetrics || {}).mentionCount || ('0/' + (reportData.totalResults || 0)) }}</strong>
+                            </div>
+                            <div class="brand-exposure-main-ring">
+                                <div id="coverageRingChart" class="ring-chart-large"></div>
+                            </div>
+                        </div>
+                        <div class="brand-exposure-mini-rings">
+                            <div class="brand-exposure-ring-item">
+                                <div id="firstRateRingChart" class="ring-chart-small"></div>
+                                <span>首位率</span>
+                            </div>
+                            <div class="brand-exposure-ring-item">
+                                <div id="top3RateRingChart" class="ring-chart-small"></div>
+                                <span>前三率</span>
+                            </div>
+                            <div class="brand-exposure-ring-item">
+                                <div id="top5RateRingChart" class="ring-chart-small"></div>
+                                <span>前五率</span>
+                            </div>
+                        </div>
+                    </section>
+                    <section class="competition-panel voice-panel">
+                        <div class="competition-panel-title"><span>∿</span> 品牌声量排名 <i>?</i><select v-model="voicePlatform" @change="handleReportPlatformChange"><option v-for="platform in reportPlatformOptions" :key="platform.value" :value="platform.value">{{ platform.label }}</option></select></div>
+                        <div id="brandVoiceChart" class="competition-chart"></div>
+                    </section>
+                    <section class="competition-panel multi-radar-panel">
+                        <div class="competition-panel-title"><span>∿</span> 多品牌雷达图 <i>?</i><select v-model="radarMetric"><option value="mentionRate">覆盖率</option><option value="firstRate">首位率</option><option value="top3Rate">前三率</option><option value="top5Rate">前五率</option></select></div>
+                        <div id="multiBrandRadarChart" class="competition-chart"></div>
+                    </section>
+                </div>
+
+                <!-- 全局报告专属：历史趋势 -->
+                <section v-if="isGlobalReport" class="global-trends-section">
+                    <div class="global-trends-heading">
+                        <div>
+                            <h3>历史趋势分析</h3>
+                            <p>按历史报告生成日期升序汇总，展示该任务重复执行后的指标变化</p>
+                        </div>
+                        <span>{{ reportData.historyReportCount || 0 }} 个历史观测点</span>
+                    </div>
+                    <div class="global-trends-grid">
+                        <article class="global-trend-card">
+                            <div class="global-trend-title"><span>∿</span><b>品牌声量趋势</b><em>单位：%</em></div>
+                            <div id="brandVoiceTrendChart" class="global-trend-chart"></div>
+                        </article>
+                        <article class="global-trend-card">
+                            <div class="global-trend-title"><span>∿</span><b>引用热度趋势</b><em>单位：次</em></div>
+                            <div id="citationHeatTrendChart" class="global-trend-chart"></div>
+                        </article>
+                        <article class="global-trend-card">
+                            <div class="global-trend-title"><span>∿</span><b>声誉正向趋势</b><em>单位：%</em></div>
+                            <div id="positiveSentimentTrendChart" class="global-trend-chart"></div>
+                        </article>
+                        <article class="global-trend-card">
+                            <div class="global-trend-title"><span>∿</span><b>竞品竞争力趋势</b></div>
+                            <div id="positioningFitTrendChart" class="global-trend-chart"></div>
+                        </article>
+                    </div>
+                </section>
+
+                <!-- 报告排名 -->
+                <div class="report-top10-grid">
+                    <section class="report-top10-card">
+                        <div class="report-top10-header">
+                            <div class="report-top10-title"><span>∿</span> 竞争力排名 <i>?</i></div>
+                        </div>
+                        <div class="report-ranking-scroll">
+                            <table class="report-top10-table">
+                                <thead><tr><th>排名</th><th>竞品品牌</th><th>综合竞争力</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="item in (competitionRankingData || [])" :key="item.rank + '-' + item.brandName">
+                                        <td><span :class="['top10-rank', 'rank-' + item.rank]">{{ item.rank }}</span></td>
+                                        <td><span :class="{ 'self-brand': item.isSelfBrand }">{{ item.brandName }}</span><em v-if="item.trend">{{ item.trend }}</em></td>
+                                        <td>{{ item.score }}</td>
+                                    </tr>
+                                    <tr v-if="!(competitionRankingData || []).length"><td colspan="3" class="top10-empty">暂无竞争力排名</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                    <section class="report-top10-card">
+                        <div class="report-top10-header">
+                            <div class="report-top10-title"><span>∿</span> 引用源地址排名 <i>?</i></div>
+                        </div>
+                        <div class="report-ranking-scroll">
+                            <table class="report-top10-table">
+                                <thead><tr><th>排名</th><th>引用源地址</th><th>引用次数</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="item in (reportData.citationPlatformRanking || reportData.citationPlatformTop10 || [])" :key="item.rank + '-' + getCitationSourceAddressLabel(item)">
+                                        <td><span :class="['top10-rank', 'rank-' + item.rank]">{{ item.rank }}</span></td>
+                                        <td :title="getCitationSourceAddressLabel(item)">{{ getCitationSourceAddressLabel(item) }} <em v-if="item.trend">{{ item.trend }}</em></td>
+                                        <td>{{ item.citationCount }}</td>
+                                    </tr>
+                                    <tr v-if="!(reportData.citationPlatformRanking || reportData.citationPlatformTop10 || []).length"><td colspan="3" class="top10-empty">暂无引用平台排名</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+                 <!-- 局部、全局报告共用：不同平台表现得分 -->
+                <section class="platform-score-section">
+                    <div class="platform-score-heading">
+                        <div>
+                            <div class="platform-score-title"><span>∿</span> 不同平台表现得分 <i>?</i></div>
+                            <p>综合展示各 AI 平台的特点、信源偏好及品牌优化方向</p>
+                        </div>
+                        <div v-if="platformScoreCards.length > 3" class="platform-score-nav" aria-label="平台卡片翻页">
+                            <button type="button" aria-label="查看前面的平台" @click="scrollPlatformScores(-1)">‹</button>
+                            <button type="button" aria-label="查看后面的平台" @click="scrollPlatformScores(1)">›</button>
+                        </div>
+                    </div>
+                    <div v-if="platformScoreCards.length" ref="platformScoreTrack" class="platform-score-track">
+                        <article
+                            v-for="card in platformScoreCards"
+                            :key="card.value"
+                            :class="['platform-score-card', 'color-' + card.colorIndex, { 'data-missing': card.dataMissing }]"
+                        >
+                            <div class="platform-score-card-head">
+                                <span class="platform-score-logo">{{ card.shortName }}</span>
+                                <div class="platform-score-name">
+                                    <strong>{{ card.label }}</strong>
+                                    <span v-if="card.rank !== '--'">第 {{ card.rank }} 名</span>
+                                    <span v-else class="pending">排名待更新</span>
+                                </div>
+                                <div class="platform-score-number">
+                                    <strong>{{ card.score }}</strong>
+                                    <span>{{ card.score === '--' ? '待评分' : '分' }}</span>
+                                </div>
+                            </div>
+                            <div class="platform-score-audience">{{ card.audience }}</div>
+                            <dl class="platform-score-details">
+                                <div><dt>核心特点</dt><dd>{{ card.coreFeatures }}</dd></div>
+                                <div><dt>信源优先</dt><dd>{{ card.sourcePriority }}</dd></div>
+                                <div><dt>优化重点</dt><dd>{{ card.optimizationFocus }}</dd></div>
+                                <div><dt>{{ reportData.brandName || '当前品牌' }}表现</dt><dd>{{ card.brandPerformance }}</dd></div>
+                            </dl>
+                        </article>
+                    </div>
+                    <div v-else class="platform-score-empty">暂无平台信息</div>
+                </section>
+                <!-- 局部、全局报告共用：引用源占比分布 -->
+                <section class="citation-source-share-card">
+                    <div class="citation-source-share-header">
+                        <div class="citation-source-share-title"><span>∿</span> 引用源地址占比分布 <i>?</i></div>
+                        <div class="citation-source-share-meta">同一站点地址合并统计 · 低占比地址自动归入“其他”</div>
+                    </div>
+                    <div id="citationSourceTreemapChart" class="citation-source-treemap-chart"></div>
+                </section>
+
+                <!-- 局部、全局报告共用：正向/负向关键词词云 -->
+                <section class="keyword-cloud-card">
+                    <div class="keyword-cloud-header">
+                        <div class="keyword-cloud-title"><span>∿</span> 品牌情绪词 <i>?</i></div>
+                        <div class="keyword-cloud-tabs" role="tablist" aria-label="关键词情绪切换">
+                            <button
+                                type="button"
+                                :class="{ active: keywordCloudMode === 'positive' }"
+                                :aria-selected="keywordCloudMode === 'positive'"
+                                @click="keywordCloudMode = 'positive'"
+                            >正向关键词</button>
+                            <button
+                                type="button"
+                                :class="{ active: keywordCloudMode === 'negative' }"
+                                :aria-selected="keywordCloudMode === 'negative'"
+                                @click="keywordCloudMode = 'negative'"
+                            >负向关键词</button>
+                        </div>
+                    </div>
+                    <div :class="['keyword-cloud-stage', keywordCloudMode]">
+                        <span
+                            v-for="(word, index) in getKeywordCloudWords(keywordCloudMode)"
+                            :key="keywordCloudMode + '-' + word.text"
+                            class="keyword-cloud-word"
+                            :style="getKeywordCloudWordStyle(word, index, keywordCloudMode)"
+                            :title="word.text + '：' + word.count + ' 次'"
+                        >{{ word.text }}</span>
+                        <div v-if="!getKeywordCloudWords(keywordCloudMode).length" class="keyword-cloud-empty">暂无{{ keywordCloudMode === 'positive' ? '正向' : '负向' }}关键词数据</div>
+                    </div>
+                    <div class="keyword-cloud-legend">字号越大，代表该关键词出现次数越多</div>
+                </section>
+
+                <!-- AI总结 -->
+                <div class="ai-summary-card">
+                    <div class="ai-summary-header">
+                        <div class="ai-summary-title">
+                            <span class="sparkle">✨</span>
+                            AI智能总结
+                        </div>
+                        <div class="ai-summary-meta">由 AI 自动生成</div>
+                    </div>
+                    <div v-if="getAiSummaryContent()" class="ai-summary-content qa-answer-text" v-html="renderAiSummaryMarkdown(getAiSummaryContent())"></div>
+                    <div v-else class="ai-summary-content" style="color: #999;">分析中...</div>
+                    <div v-if="reportData.aiSummary && reportData.aiSummary.highlights && reportData.aiSummary.highlights.length > 0" class="ai-summary-highlights">
+                        <div class="ai-summary-highlights-title">关键发现</div>
+                        <ul class="ai-highlight-list">
+                            <li v-for="(hl, idx) in reportData.aiSummary.highlights" :key="idx">{{ hl }}</li>
+                        </ul>
+                    </div>
+                    <div v-if="reportData.aiSummary && reportData.aiSummary.suggestions && reportData.aiSummary.suggestions.length > 0" class="ai-summary-highlights">
+                        <div class="ai-summary-highlights-title">改进建议</div>
+                        <ul class="ai-highlight-list">
+                            <li v-for="(sg, idx) in reportData.aiSummary.suggestions" :key="idx">{{ sg }}</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 问答详情弹窗 -->
+        <div v-if="qaModal && qaModal.show" class="modal-overlay" @click="qaModal.show = false">
+            <div class="modal" @click.stop>
+                <div class="modal-header">
+                    <h3 class="modal-title">问答详情</h3>
+                    <button class="modal-close" @click="qaModal.show = false">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="modal-section">
+                        <div class="modal-section-title">📝 问题</div>
+                        <div class="modal-section-content">{{ qaModal.data.questionText }}</div>
+                    </div>
+                    <div class="modal-section">
+                        <div class="modal-section-title">🤔 思考过程</div>
+                        <div
+                            class="modal-section-content thinking qa-answer-text"
+                            v-html="renderMarkdown(qaModal.data.thinkingContent || '暂无思考内容')"
+                        ></div>
+                    </div>
+                    <div class="modal-section">
+                        <div class="modal-section-title">💡 回答结果</div>
+                        <div
+                            class="modal-section-content answer qa-answer-text"
+                            v-html="renderMarkdown(qaModal.data.answerText || '暂无回答')"
+                        ></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 品牌排名弹窗 -->
+        <div v-if="rankingModal && rankingModal.show" class="modal-overlay" @click="rankingModal.show = false">
+            <div class="modal" @click.stop style="max-width: 860px;">
+                <div class="modal-header">
+                    <h3 class="modal-title">品牌出现顺序排名</h3>
+                    <button class="modal-close" @click="rankingModal.show = false">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div v-if="rankingModal.loading" class="report-loading">
+                        <div class="spinner"></div>
+                        <span>正在分析排名...</span>
+                    </div>
+                    <div v-if="!rankingModal.loading">
+                        <div class="ranking-answer-info">
+                            <div class="ranking-question">
+                                <span class="ranking-info-label">询问：</span>
+                                <span>{{ rankingModal.questionText }}</span>
+                            </div>
+                            <div class="ranking-platform">
+                                <span class="ranking-info-label">平台：</span>
+                                <span>{{ rankingModal.aiDisplayName }}</span>
+                                <span class="ranking-info-label" style="margin-left: 20px;">状态：</span>
+                                <span>{{ rankingModal.status === 'SUCCESS' ? '✅ 已完成' : '⏳ ' + rankingModal.status }}</span>
+                            </div>
+                        </div>
+
+                        <div class="ranking-summary-header">
+                            <div class="ranking-summary-title">📊 品牌出现顺序排名（先出现的排名越前，未出现则为空）</div>
+                        </div>
+
+                        <table class="ranking-detail-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 90px;">名次</th>
+                                    <th>品牌名称</th>
+                                    <th style="width: 120px;">品牌类型</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(brand, idx) in (rankingModal.brandRankings || [])" :key="idx" :class="brand.rank === 1 ? 'ranking-row-top1' : (brand.rank && brand.rank <= 3 ? 'ranking-row-top3' : '')">
+                                    <td>
+                                        <span v-if="brand.rank" :class="['ranking-badge', getRankingBadgeClass(brand.rank)]">
+                                            {{ brand.rank }}
+                                        </span>
+                                        <span v-else class="ranking-badge-empty">-</span>
+                                    </td>
+                                    <td>
+                                        <span v-if="brand.isSelfBrand" class="self-brand-tag" title="自主品牌">
+                                            🏷️ {{ brand.brandName }}
+                                        </span>
+                                        <span v-else>{{ brand.brandName }}</span>
+                                    </td>
+                                    <td>
+                                        <span v-if="brand.isSelfBrand" class="tag-self">自主品牌</span>
+                                        <span v-else class="tag-competitor">竞品品牌</span>
+                                    </td>
+                                </tr>
+                                <tr v-if="!rankingModal.brandRankings || rankingModal.brandRankings.length === 0">
+                                    <td colspan="3" class="empty-state" style="text-align: center;">暂无排名数据</td>
+                                </tr>
+                            </tbody>
+                        </table>
+
+                        <div class="ranking-legend">
+                            <div><span class="ranking-badge top1">1</span> 第1位出现</div>
+                            <div><span class="ranking-badge top2">2</span> 第2位出现</div>
+                            <div><span class="ranking-badge top3">3</span> 第3位出现</div>
+                            <div><span class="ranking-badge normal">4</span> 第4位及以后</div>
+                            <div><span class="ranking-badge-empty">-</span> 回答中未出现</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 截图预览弹窗 -->
+        <div v-if="screenshotModal && screenshotModal.show" class="modal-overlay" @click="screenshotModal.show = false">
+            <div class="modal" @click.stop>
+                <div class="modal-header">
+                    <h3 class="modal-title">截图预览</h3>
+                    <button class="modal-close" @click="screenshotModal.show = false">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="screenshots-preview">
+                        <div
+                            v-for="(url, index) in (screenshotModal.data?.screenshotUrls || [])"
+                            :key="url"
+                            class="screenshot-item"
+                            @click="openImageModal(url, index + 1)"
+                        >
+                            <img :src="url.startsWith('data:') ? url : url + '?t=' + new Date().getTime()" :alt="'截图' + (index + 1)">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 联网记录弹窗 -->
+        <div v-if="networkModal && networkModal.show" class="modal-overlay" @click="networkModal.show = false">
+            <div class="modal" @click.stop style="max-width: 1000px;">
+                <div class="modal-header">
+                    <h3 class="modal-title">联网记录</h3>
+                    <button class="modal-close" @click="networkModal.show = false">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <table class="network-table">
+                        <thead>
+                            <tr>
+                                <th>引用序号</th>
+                                <th>网站名称</th>
+                                <th>作者</th>
+                                <th>发布时间</th>
+                                <th>地址</th>
+                                <th>标题</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(source, index) in (networkModal.data?.sources || [])" :key="index">
+                                <td>{{ index + 1 }}</td>
+                                <td>{{ source.siteName || '-' }}</td>
+                                <td>{{ source.author || '-' }}</td>
+                                <td>{{ source.publishTime || '-' }}</td>
+                                <td><a :href="source.url" target="_blank" class="source-title">{{ source.url }}</a></td>
+                                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="source.title">{{ source.title }}</td>
+                            </tr>
+                            <tr v-if="!networkModal.data.sources || networkModal.data.sources.length === 0">
+                                <td colspan="6" class="empty-state" style="text-align: center;">暂无联网记录</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 图片大图预览 -->
+        <div v-if="imageModal && imageModal.show" class="image-modal">
+            <div class="image-modal-toolbar">
+                <span class="image-modal-title">截图 {{ imageModal.index }}</span>
+                <button type="button" class="image-zoom-btn" title="缩小" @click="zoomImageOut">−</button>
+                <span class="image-zoom-value">{{ Math.round(imageModal.zoom * 100) }}%</span>
+                <button type="button" class="image-zoom-btn" title="放大" @click="zoomImageIn">+</button>
+                <button type="button" class="image-zoom-text-btn" @click="fitImageToScreen">适应屏幕</button>
+                <button type="button" class="image-zoom-text-btn" @click="resetImageZoom">原始大小</button>
+                <button type="button" class="image-modal-close" title="关闭" @click="closeImageModal">&times;</button>
+            </div>
+            <div
+                ref="imageModalStage"
+                :class="['image-modal-stage', { 'is-panning': imagePan.active }]"
+                title="滚轮缩放，按住拖动，双击切换原始大小"
+                @wheel.prevent="handleImageWheel"
+                @dblclick="toggleImageZoom"
+                @pointerdown="startImagePan"
+                @pointermove="moveImagePan"
+                @pointerup="stopImagePan"
+                @pointercancel="stopImagePan"
+                @lostpointercapture="stopImagePan"
+            >
+                <div class="image-modal-scroll-content">
+                    <div
+                        class="image-modal-canvas"
+                        :style="imageModal.naturalWidth ? {
+                            width: (imageModal.naturalWidth * imageModal.zoom) + 'px',
+                            height: (imageModal.naturalHeight * imageModal.zoom) + 'px'
+                        } : {}"
+                    >
+                        <img
+                            :src="imageModal.url"
+                            :alt="'截图' + imageModal.index"
+                            draggable="false"
+                            @dragstart.prevent
+                            @load="handleImageLoad"
+                        >
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast通知 -->
+        <div v-if="toast && toast.show" :class="['toast', toast.type]">{{ toast.message }}</div>
+    </div>
+
+    <script src="js/config.js?v=20260826_handoff_v5"></script>
+    <script src="js/bootstrap.js?v=20260826_handoff_v5"></script>
+</body>
+</html>

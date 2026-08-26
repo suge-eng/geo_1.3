@@ -1,0 +1,219 @@
+services:
+  # ======== 基础中间件（4 个容器，保持与原单体一致）========
+  mysql:
+    image: mysql:8.0
+    container_name: geo-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: geo_backend
+      TZ: Asia/Shanghai
+    ports:
+      - "3307:3306"
+    volumes:
+      - geo-mysql-data:/var/lib/mysql
+      - ../geo_1.2/src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../geo_1.2/src/main/resources/db/init-accounts.sql:/docker-entrypoint-initdb.d/02-accounts.sql:ro
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    networks:
+      - geo-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: geo-redis
+    command: redis-server --requirepass 123456 --appendonly yes
+    ports:
+      - "6380:6379"
+    volumes:
+      - geo-redis-data:/data
+    networks:
+      - geo-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "123456", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: geo-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    volumes:
+      - geo-rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - geo-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: geo-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9002:9000"
+      - "9001:9001"
+    volumes:
+      - geo-minio-data:/data
+    networks:
+      - geo-net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # ======== 微服务业务容器（默认注释掉，国内拉取不到 Docker Hub 时先本地启动 Java 进程）
+  # ======== 当你配置好 Docker 国内镜像源后，取消下面注释即可全容器化
+  #
+  # geo-task-service:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.task
+  #   container_name: geo-task-service
+  #   ports:
+  #     - "8081:8081"
+  #   environment:
+  #     SPRING_PROFILES_ACTIVE: docker
+  #     GEO_DB_HOST: geo-mysql
+  #     GEO_DB_PORT: 3306
+  #     GEO_REDIS_HOST: geo-redis
+  #     GEO_REDIS_PORT: 6379
+  #     GEO_RPA_SERVICE_URL: http://geo-rpa-service:8084
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - geo-net
+  #   restart: unless-stopped
+  #
+  # geo-analysis-service:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.analysis
+  #   container_name: geo-analysis-service
+  #   ports:
+  #     - "8082:8082"
+  #   environment:
+  #     SPRING_PROFILES_ACTIVE: docker
+  #     GEO_DB_HOST: geo-mysql
+  #     GEO_DB_PORT: 3306
+  #     GEO_REDIS_HOST: geo-redis
+  #     GEO_REDIS_PORT: 6379
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - geo-net
+  #   restart: unless-stopped
+  #
+  # geo-file-service:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.file
+  #   container_name: geo-file-service
+  #   ports:
+  #     - "8083:8083"
+  #   environment:
+  #     SPRING_PROFILES_ACTIVE: docker
+  #     GEO_MINIO_ENDPOINT: http://geo-minio:9000
+  #     GEO_MINIO_PUBLIC_ENDPOINT: http://localhost:9002
+  #   depends_on:
+  #     minio:
+  #       condition: service_healthy
+  #   networks:
+  #     - geo-net
+  #   restart: unless-stopped
+  #
+  # geo-rpa-service:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.rpa
+  #   container_name: geo-rpa-service
+  #   ports:
+  #     - "8084:8084"
+  #   environment:
+  #     SPRING_PROFILES_ACTIVE: docker
+  #     GEO_DB_HOST: geo-mysql
+  #     GEO_DB_PORT: 3306
+  #     GEO_REDIS_HOST: geo-redis
+  #     GEO_REDIS_PORT: 6379
+  #     GEO_MQ_HOST: geo-rabbitmq
+  #     GEO_MQ_PORT: 5672
+  #     GEO_MINIO_ENDPOINT: http://geo-minio:9000
+  #     GEO_MINIO_PUBLIC_ENDPOINT: http://localhost:9002
+  #     GEO_TASK_SERVICE_URL: http://geo-task-service:8081
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     rabbitmq:
+  #       condition: service_healthy
+  #     minio:
+  #       condition: service_healthy
+  #   networks:
+  #     - geo-net
+  #   restart: unless-stopped
+  #
+  # geo-gateway:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.gateway
+  #   container_name: geo-gateway
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     SPRING_PROFILES_ACTIVE: docker
+  #     GEO_REDIS_HOST: geo-redis
+  #     GEO_REDIS_PORT: 6379
+  #     GEO_TASK_SERVICE_URL: http://geo-task-service:8081
+  #     GEO_ANALYSIS_SERVICE_URL: http://geo-analysis-service:8082
+  #     GEO_FILE_SERVICE_URL: http://geo-file-service:8083
+  #     GEO_RPA_SERVICE_URL: http://geo-rpa-service:8084
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #     geo-task-service:
+  #       condition: service_started
+  #     geo-analysis-service:
+  #       condition: service_started
+  #     geo-file-service:
+  #       condition: service_started
+  #     geo-rpa-service:
+  #       condition: service_started
+  #   networks:
+  #     - geo-net
+  #   restart: unless-stopped
+
+volumes:
+  geo-mysql-data:
+  geo-redis-data:
+  geo-rabbitmq-data:
+  geo-minio-data:
+
+networks:
+  geo-net:
+    driver: bridge

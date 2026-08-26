@@ -1,0 +1,7 @@
+# 先执行：mvn -pl geo-rpa-service -am -DskipTests package
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY geo-rpa-service/target/geo-rpa-service.jar app.jar
+ENV JAVA_OPTS="-Xmx512m"
+EXPOSE 8084
+ENTRYPOINT ["sh","-c","java $JAVA_OPTS -jar app.jar"]

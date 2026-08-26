@@ -1,0 +1,59 @@
+server:
+  address: 0.0.0.0
+  port: 8080
+  connection-timeout: 600s
+  forward-headers-strategy: framework
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml
+    min-response-size: 1024
+  tomcat:
+    keep-alive-timeout: 600s
+    max-keep-alive-requests: -1
+    max-threads: 200
+    accept-count: 1000
+    remoteip:
+      remote-ip-header: X-Forwarded-For
+      protocol-header: X-Forwarded-Proto
+      host-header: X-Forwarded-Host
+      port-header: X-Forwarded-Port
+
+spring:
+  application:
+    name: geo-gateway
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration
+  mvc:
+    async:
+      request-timeout: 600000
+    static-path-pattern: /**
+    throw-exception-if-no-handler-found: true
+
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      password: redis123
+      database: 0
+      timeout: 10s
+      lettuce:
+        pool:
+          max-active: 8
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+  web:
+    resources:
+      add-mappings: true
+      static-locations: classpath:/static/
+
+logging:
+  level:
+    com.geo: DEBUG

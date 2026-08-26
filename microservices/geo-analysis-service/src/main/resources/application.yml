@@ -1,0 +1,62 @@
+server:
+  address: 0.0.0.0
+  port: 8082
+  connection-timeout: 600s
+  forward-headers-strategy: framework
+  tomcat:
+    keep-alive-timeout: 600s
+    max-keep-alive-requests: -1
+    max-threads: 200
+    accept-count: 1000
+
+spring:
+  application:
+    name: geo-analysis-service
+  mvc:
+    async:
+      request-timeout: 600000
+
+  datasource:
+    url: jdbc:mysql://localhost:3307/geo_backend?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: geo
+    password: geo123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      password: redis123
+      timeout: 10s
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      table-underline: true
+  mapper-locations: classpath*:mapper/**/*.xml
+
+logging:
+  level:
+    com.geo: DEBUG
+
+geo:
+  ai:
+    api-key: sk-34fbbe6fb8c94c41adb9990396b6c636
+    api-endpoint: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3.7-plus-2026-05-26
+    timeout-seconds: 300
+    enabled: true
+    batch-size: 15
+    max-concurrency: 8
+    failover-to-text-match: true
+  report:
+    async-threshold: 100

@@ -1,0 +1,7 @@
+# 先执行：mvn -pl geo-task-service -am -DskipTests package
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY geo-task-service/target/geo-task-service.jar app.jar
+ENV JAVA_OPTS="-Xmx1024m"
+EXPOSE 8081
+ENTRYPOINT ["sh","-c","java $JAVA_OPTS -jar app.jar"]
