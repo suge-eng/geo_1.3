@@ -339,6 +339,9 @@ public class AnalysisReportResponse {
         private Map<String, Integer> perPlatformSelfMentionCount;
         private double positiveReputationRate;
         private String positiveReputationSub;
+        private Map<String, Integer> perPlatformWhitelistMatchCount;
+        private Map<String, Integer> perPlatformTotalSourceCount;
+        private Map<String, Double> perPlatformWhitelistMatchRate;
 
         public String getMentionCount() { return mentionCount; }
         public void setMentionCount(String mentionCount) { this.mentionCount = mentionCount; }
@@ -364,6 +367,12 @@ public class AnalysisReportResponse {
         public void setPositiveReputationRate(double positiveReputationRate) { this.positiveReputationRate = positiveReputationRate; }
         public String getPositiveReputationSub() { return positiveReputationSub; }
         public void setPositiveReputationSub(String positiveReputationSub) { this.positiveReputationSub = positiveReputationSub; }
+        public Map<String, Integer> getPerPlatformWhitelistMatchCount() { return perPlatformWhitelistMatchCount; }
+        public void setPerPlatformWhitelistMatchCount(Map<String, Integer> perPlatformWhitelistMatchCount) { this.perPlatformWhitelistMatchCount = perPlatformWhitelistMatchCount; }
+        public Map<String, Integer> getPerPlatformTotalSourceCount() { return perPlatformTotalSourceCount; }
+        public void setPerPlatformTotalSourceCount(Map<String, Integer> perPlatformTotalSourceCount) { this.perPlatformTotalSourceCount = perPlatformTotalSourceCount; }
+        public Map<String, Double> getPerPlatformWhitelistMatchRate() { return perPlatformWhitelistMatchRate; }
+        public void setPerPlatformWhitelistMatchRate(Map<String, Double> perPlatformWhitelistMatchRate) { this.perPlatformWhitelistMatchRate = perPlatformWhitelistMatchRate; }
 
         public static Builder builder() { return new Builder(); }
 
@@ -381,6 +390,9 @@ public class AnalysisReportResponse {
             public Builder perPlatformSelfMentionCount(Map<String, Integer> map) { metrics.perPlatformSelfMentionCount = map; return this; }
             public Builder positiveReputationRate(double rate) { metrics.positiveReputationRate = rate; return this; }
             public Builder positiveReputationSub(String sub) { metrics.positiveReputationSub = sub; return this; }
+            public Builder perPlatformWhitelistMatchCount(Map<String, Integer> map) { metrics.perPlatformWhitelistMatchCount = map; return this; }
+            public Builder perPlatformTotalSourceCount(Map<String, Integer> map) { metrics.perPlatformTotalSourceCount = map; return this; }
+            public Builder perPlatformWhitelistMatchRate(Map<String, Double> map) { metrics.perPlatformWhitelistMatchRate = map; return this; }
             public ExposureMetrics build() { return metrics; }
         }
     }

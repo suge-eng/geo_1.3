@@ -28,6 +28,7 @@ public class Task {
     private Boolean retryOnFailure;
     private LocalDateTime nextRunTime;
     private String errorMsg;
+    private String whitelistUrls;
 
     @TableField(exist = false)
     private String scope;
@@ -81,6 +82,8 @@ public class Task {
     public void setNextRunTime(LocalDateTime nextRunTime) { this.nextRunTime = nextRunTime; }
     public String getErrorMsg() { return errorMsg; }
     public void setErrorMsg(String errorMsg) { this.errorMsg = errorMsg; }
+    public String getWhitelistUrls() { return whitelistUrls; }
+    public void setWhitelistUrls(String whitelistUrls) { this.whitelistUrls = whitelistUrls; }
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }

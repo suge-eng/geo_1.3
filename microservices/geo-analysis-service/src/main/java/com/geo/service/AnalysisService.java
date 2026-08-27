@@ -392,9 +392,19 @@ public class AnalysisService {
         int[] posRep = computePositiveReputationCounts(validResults, selfBrand, aiBrandRankings);
         int posPositive = posRep[0];
         int posMentioned = posRep[1];
+
+        List<String> whitelistUrls = parseWhitelistUrls(task.getWhitelistUrls());
+        Map<String, Integer> perPlatformWhitelistMatchCount = new LinkedHashMap<>();
+        Map<String, Integer> perPlatformTotalSourceCount = new LinkedHashMap<>();
+        Map<String, Double> perPlatformWhitelistMatchRate = new LinkedHashMap<>();
+        if (whitelistUrls != null && !whitelistUrls.isEmpty()) {
+            computeWhitelistStats(validResults, whitelistUrls, perPlatformWhitelistMatchCount, perPlatformTotalSourceCount, perPlatformWhitelistMatchRate);
+        }
+
         List<AnalysisReportResponse.CompetitionRankingItem> competitionRanking = buildCompetitionRanking(selfBrand, competitorBrands, brandComparison);
         AiSummary aiSummary = buildAiSummary(task, results, brandMetricsMap, selfBrand, competitorBrands, validCount);
-        ExposureMetrics exposureMetrics = buildExposureMetrics(brandMetricsMap.get(selfBrand), validCount, selfMentionCount, competitorMentionCount, perPlatformSelfMentionCount, posPositive, posMentioned);
+        ExposureMetrics exposureMetrics = buildExposureMetrics(brandMetricsMap.get(selfBrand), validCount, selfMentionCount, competitorMentionCount, perPlatformSelfMentionCount, posPositive, posMentioned,
+                perPlatformWhitelistMatchCount, perPlatformTotalSourceCount, perPlatformWhitelistMatchRate);
         AnalysisReportResponse.KeywordCloud keywordCloud = buildKeywordCloud(validResults);
 
         if (progressCallback != null) progressCallback.accept(92);
@@ -548,6 +558,111 @@ public class AnalysisService {
             }
         }
         return result;
+    }
+
+    private List<String> parseWhitelistUrls(String whitelistUrlsStr) {
+        List<String> result = new ArrayList<>();
+        if (whitelistUrlsStr == null || whitelistUrlsStr.isEmpty()) {
+            return result;
+        }
+        try {
+            List<String> parsed = objectMapper.readValue(whitelistUrlsStr, new TypeReference<List<String>>() {});
+            if (parsed != null) {
+                for (String s : parsed) {
+                    if (s != null && !s.trim().isEmpty()) {
+                        String normalized = normalizeWhitelistDomain(s.trim());
+                        if (normalized != null && !normalized.isEmpty() && !result.contains(normalized)) {
+                            result.add(normalized);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("白名单URLs JSON解析失败: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    private String normalizeWhitelistDomain(String domain) {
+        if (domain == null || domain.isEmpty()) {
+            return null;
+        }
+        String result = domain.toLowerCase().trim();
+        if (result.startsWith("http://")) {
+            result = result.substring(7);
+        } else if (result.startsWith("https://")) {
+            result = result.substring(8);
+        }
+        if (result.startsWith("www.")) {
+            result = result.substring(4);
+        }
+        int slashIdx = result.indexOf('/');
+        if (slashIdx > 0) {
+            result = result.substring(0, slashIdx);
+        }
+        int queryIdx = result.indexOf('?');
+        if (queryIdx > 0) {
+            result = result.substring(0, queryIdx);
+        }
+        return result.trim();
+    }
+
+    private void computeWhitelistStats(List<TaskResult> validResults, List<String> whitelistUrls,
+                                       Map<String, Integer> perPlatformWhitelistMatchCount,
+                                       Map<String, Integer> perPlatformTotalSourceCount,
+                                       Map<String, Double> perPlatformWhitelistMatchRate) {
+        if (validResults == null || whitelistUrls == null || whitelistUrls.isEmpty()) {
+            return;
+        }
+        Set<String> whitelistSet = new HashSet<>(whitelistUrls);
+
+        for (TaskResult r : validResults) {
+            if (r == null) continue;
+            String platformCode = normalizeAiPlatformCode(r.getAiPlatform());
+            if (platformCode == null) continue;
+
+            int totalCount = perPlatformTotalSourceCount.getOrDefault(platformCode, 0);
+            int matchCount = perPlatformWhitelistMatchCount.getOrDefault(platformCode, 0);
+
+            if (r.getSourceInfo() != null && !r.getSourceInfo().isEmpty()) {
+                try {
+                    List<List<String>> sourceData = objectMapper.readValue(
+                            r.getSourceInfo(), new TypeReference<List<List<String>>>() {});
+                    if (sourceData != null) {
+                        for (List<String> item : sourceData) {
+                            if (item == null || item.size() < 2) continue;
+                            String url = item.get(1);
+                            String siteName = extractSiteName(url);
+                            totalCount++;
+                            if (siteName != null && whitelistSet.contains(siteName.toLowerCase())) {
+                                matchCount++;
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("解析sourceInfo计算白名单统计失败: {}", e.getMessage());
+                }
+            }
+
+            perPlatformTotalSourceCount.put(platformCode, totalCount);
+            perPlatformWhitelistMatchCount.put(platformCode, matchCount);
+        }
+
+        for (Map.Entry<String, Integer> entry : perPlatformTotalSourceCount.entrySet()) {
+            String platform = entry.getKey();
+            int total = entry.getValue();
+            int match = perPlatformWhitelistMatchCount.getOrDefault(platform, 0);
+            double rate = total > 0 ? (double) match / total * 100.0 : 0.0;
+            rate = Math.round(rate * 100.0) / 100.0;
+            perPlatformWhitelistMatchRate.put(platform, rate);
+        }
+
+        log.info("白名单统计完成: whitelistSize={}, platforms={}, matchCounts={}, totalCounts={}, rates={}",
+                whitelistUrls.size(),
+                perPlatformTotalSourceCount.keySet(),
+                perPlatformWhitelistMatchCount,
+                perPlatformTotalSourceCount,
+                perPlatformWhitelistMatchRate);
     }
 
     public static class BrandMetrics {
@@ -1011,7 +1126,8 @@ public class AnalysisService {
         return new int[]{selfCount, compCount};
     }
 
-    private ExposureMetrics buildExposureMetrics(BrandMetrics selfBrandMetrics, int validCount, int selfMentionCount, int competitorMentionCount, Map<String, Integer> perPlatformSelfMentionCount, int posPositive, int posMentioned) {
+    private ExposureMetrics buildExposureMetrics(BrandMetrics selfBrandMetrics, int validCount, int selfMentionCount, int competitorMentionCount, Map<String, Integer> perPlatformSelfMentionCount, int posPositive, int posMentioned,
+                                                 Map<String, Integer> perPlatformWhitelistMatchCount, Map<String, Integer> perPlatformTotalSourceCount, Map<String, Double> perPlatformWhitelistMatchRate) {
         int total = selfMentionCount + competitorMentionCount;
         int competitiveScore = 0;
         if (total > 0) {
@@ -1043,6 +1159,9 @@ public class AnalysisService {
                     .perPlatformSelfMentionCount(perPlatformSelfMentionCount)
                     .positiveReputationRate(positiveReputationRate)
                     .positiveReputationSub(positiveReputationSub)
+                    .perPlatformWhitelistMatchCount(perPlatformWhitelistMatchCount)
+                    .perPlatformTotalSourceCount(perPlatformTotalSourceCount)
+                    .perPlatformWhitelistMatchRate(perPlatformWhitelistMatchRate)
                     .build();
         }
         int mentionCount = selfBrandMetrics.getMentionCount();
@@ -1066,6 +1185,9 @@ public class AnalysisService {
                 .perPlatformSelfMentionCount(perPlatformSelfMentionCount)
                 .positiveReputationRate(positiveReputationRate)
                 .positiveReputationSub(positiveReputationSub)
+                .perPlatformWhitelistMatchCount(perPlatformWhitelistMatchCount)
+                .perPlatformTotalSourceCount(perPlatformTotalSourceCount)
+                .perPlatformWhitelistMatchRate(perPlatformWhitelistMatchRate)
                 .build();
     }
 
@@ -2510,6 +2632,10 @@ public class AnalysisService {
         for (String p : activePlatformCodes) {
             platformCitationSeries.put(p, new ArrayList<>());
         }
+        final boolean[] globalHasWhitelistMode = {false};
+
+        Map<String, Integer> globalWhitelistMatchCountAgg = new LinkedHashMap<>();
+        Map<String, Integer> globalTotalSourceCountAgg = new LinkedHashMap<>();
 
         Map<String, Integer> citationPlatformAgg = new LinkedHashMap<>();
         Map<String, Integer> citationUrlAgg = new LinkedHashMap<>();
@@ -2570,6 +2696,21 @@ public class AnalysisService {
                     } catch (NumberFormatException ignore) {}
                 }
 
+                if (em.getPerPlatformWhitelistMatchCount() != null) {
+                    for (Map.Entry<String, Integer> e : em.getPerPlatformWhitelistMatchCount().entrySet()) {
+                        String code = normalizeAiPlatformCode(e.getKey());
+                        if (code == null) code = e.getKey();
+                        globalWhitelistMatchCountAgg.merge(code, e.getValue() != null ? e.getValue() : 0, Integer::sum);
+                    }
+                }
+                if (em.getPerPlatformTotalSourceCount() != null) {
+                    for (Map.Entry<String, Integer> e : em.getPerPlatformTotalSourceCount().entrySet()) {
+                        String code = normalizeAiPlatformCode(e.getKey());
+                        if (code == null) code = e.getKey();
+                        globalTotalSourceCountAgg.merge(code, e.getValue() != null ? e.getValue() : 0, Integer::sum);
+                    }
+                }
+
                 selfCoverageSeries.add(Math.round(em.getCoverageRate() * 10) / 10.0);
                 selfFirstRateSeries.add(Math.round(em.getFirstRate() * 10) / 10.0);
                 selfTop3RateSeries.add(Math.round(em.getTop3Rate() * 10) / 10.0);
@@ -2624,54 +2765,75 @@ public class AnalysisService {
                 brandVoiceSeries.get(brand).add(Math.round(coverageValue * 10) / 10.0);
             }
 
-            Map<String, Integer> perPlatformMention = null;
             AnalysisReportResponse.ExposureMetrics emForH = r.getExposureMetrics();
-            if (emForH != null && emForH.getPerPlatformSelfMentionCount() != null && !emForH.getPerPlatformSelfMentionCount().isEmpty()) {
-                perPlatformMention = emForH.getPerPlatformSelfMentionCount();
-            } else if (r.getPerPlatformBrandComparison() != null) {
-                perPlatformMention = new LinkedHashMap<>();
-                for (Map.Entry<String, AnalysisReportResponse.BrandComparisonTable> e : r.getPerPlatformBrandComparison().entrySet()) {
-                    String platformCode = normalizeAiPlatformCode(e.getKey());
-                    if (platformCode == null) platformCode = e.getKey();
-                    AnalysisReportResponse.BrandComparisonTable pt = e.getValue();
-                    if (pt == null || pt.getColumns() == null || pt.getRows() == null) continue;
-                    AnalysisReportResponse.ComparisonRow platformCoverageRow = null;
-                    for (AnalysisReportResponse.ComparisonRow row : pt.getRows()) {
-                        if (row != null && "品牌覆盖率".equals(row.getMetric())) {
-                            platformCoverageRow = row;
-                            break;
+            Map<String, Double> perPlatformWhitelistRate = (emForH != null && emForH.getPerPlatformWhitelistMatchRate() != null && !emForH.getPerPlatformWhitelistMatchRate().isEmpty())
+                    ? emForH.getPerPlatformWhitelistMatchRate()
+                    : null;
+
+            Map<String, Integer> perPlatformMention = null;
+            if (perPlatformWhitelistRate == null) {
+                if (emForH != null && emForH.getPerPlatformSelfMentionCount() != null && !emForH.getPerPlatformSelfMentionCount().isEmpty()) {
+                    perPlatformMention = emForH.getPerPlatformSelfMentionCount();
+                } else if (r.getPerPlatformBrandComparison() != null) {
+                    perPlatformMention = new LinkedHashMap<>();
+                    for (Map.Entry<String, AnalysisReportResponse.BrandComparisonTable> e : r.getPerPlatformBrandComparison().entrySet()) {
+                        String platformCode = normalizeAiPlatformCode(e.getKey());
+                        if (platformCode == null) platformCode = e.getKey();
+                        AnalysisReportResponse.BrandComparisonTable pt = e.getValue();
+                        if (pt == null || pt.getColumns() == null || pt.getRows() == null) continue;
+                        AnalysisReportResponse.ComparisonRow platformCoverageRow = null;
+                        for (AnalysisReportResponse.ComparisonRow row : pt.getRows()) {
+                            if (row != null && "品牌覆盖率".equals(row.getMetric())) {
+                                platformCoverageRow = row;
+                                break;
+                            }
                         }
-                    }
-                    if (platformCoverageRow == null || platformCoverageRow.getValues() == null) continue;
-                    int colIdx = -1;
-                    for (int ci = 1; ci < pt.getColumns().size(); ci++) {
-                        String colName = pt.getColumns().get(ci);
-                        if ((selfBrand == null && colName == null) || (selfBrand != null && selfBrand.equals(colName))) {
-                            colIdx = ci;
-                            break;
+                        if (platformCoverageRow == null || platformCoverageRow.getValues() == null) continue;
+                        int colIdx = -1;
+                        for (int ci = 1; ci < pt.getColumns().size(); ci++) {
+                            String colName = pt.getColumns().get(ci);
+                            if ((selfBrand == null && colName == null) || (selfBrand != null && selfBrand.equals(colName))) {
+                                colIdx = ci;
+                                break;
+                            }
                         }
-                    }
-                    if (colIdx > 0 && colIdx - 1 < platformCoverageRow.getValues().size()) {
-                        String raw = platformCoverageRow.getValues().get(colIdx - 1);
-                        int totalAns = pt.getTotalValidAnswers();
-                        double coveragePct = 0;
-                        if (raw != null && !raw.isEmpty()) {
-                            try {
-                                String num = raw.replace("%", "").trim();
-                                coveragePct = Double.parseDouble(num);
-                            } catch (NumberFormatException ignore) {}
+                        if (colIdx > 0 && colIdx - 1 < platformCoverageRow.getValues().size()) {
+                            String raw = platformCoverageRow.getValues().get(colIdx - 1);
+                            int totalAns = pt.getTotalValidAnswers();
+                            double coveragePct = 0;
+                            if (raw != null && !raw.isEmpty()) {
+                                try {
+                                    String num = raw.replace("%", "").trim();
+                                    coveragePct = Double.parseDouble(num);
+                                } catch (NumberFormatException ignore) {}
+                            }
+                            int count = (int) Math.round(coveragePct / 100.0 * totalAns);
+                            perPlatformMention.put(platformCode, count);
                         }
-                        int count = (int) Math.round(coveragePct / 100.0 * totalAns);
-                        perPlatformMention.put(platformCode, count);
                     }
                 }
             }
+
             for (String platform : activePlatformCodes) {
-                int count = 0;
-                if (perPlatformMention != null && perPlatformMention.containsKey(platform)) {
-                    count = perPlatformMention.get(platform);
+                if (perPlatformWhitelistRate != null) {
+                    double rate = 0.0;
+                    if (perPlatformWhitelistRate.containsKey(platform)) {
+                        rate = perPlatformWhitelistRate.get(platform);
+                    }
+                    platformCitationSeries.get(platform).add(Math.round(rate * 100) / 100.0);
+                } else {
+                    int count = 0;
+                    if (perPlatformMention != null && perPlatformMention.containsKey(platform)) {
+                        count = perPlatformMention.get(platform);
+                    }
+                    platformCitationSeries.get(platform).add((double) count);
                 }
-                platformCitationSeries.get(platform).add((double) count);
+            }
+
+            if (perPlatformWhitelistRate != null) {
+                if (!globalHasWhitelistMode[0]) {
+                    globalHasWhitelistMode[0] = true;
+                }
             }
 
             Map<String, AnalysisReportResponse.BrandComparisonTable> perPlatBc = r.getPerPlatformBrandComparison();
@@ -2828,7 +2990,7 @@ public class AnalysisService {
             vi++;
         }
         AnalysisReportResponse.TrendMetricGroup citationHeatGroup = new AnalysisReportResponse.TrendMetricGroup();
-        citationHeatGroup.setUnit("次");
+        citationHeatGroup.setUnit(globalHasWhitelistMode[0] ? "%" : "次");
         citationHeatGroup.setSeries(citationHeatSeriesList);
 
         List<AnalysisReportResponse.TrendSeries> positiveSentimentSeriesList = new ArrayList<>();
@@ -2967,6 +3129,18 @@ public class AnalysisService {
                 "针对引用热度较低的平台补充权威内容",
                 "结合单次报告定位异常波动的具体问句"));
 
+        Map<String, Double> globalPerPlatformWhitelistMatchRate = new LinkedHashMap<>();
+        if (!globalTotalSourceCountAgg.isEmpty()) {
+            for (Map.Entry<String, Integer> entry : globalTotalSourceCountAgg.entrySet()) {
+                String platform = entry.getKey();
+                int total = entry.getValue();
+                int match = globalWhitelistMatchCountAgg.getOrDefault(platform, 0);
+                double rate = total > 0 ? (double) match / total * 100.0 : 0.0;
+                rate = Math.round(rate * 100.0) / 100.0;
+                globalPerPlatformWhitelistMatchRate.put(platform, rate);
+            }
+        }
+
         AnalysisReportResponse.ExposureMetrics exposureMetrics = AnalysisReportResponse.ExposureMetrics.builder()
                 .mentionCount(mentionCountStr)
                 .coverageRate(avgCoverageRate)
@@ -2977,6 +3151,9 @@ public class AnalysisService {
                 .naturalRecommendationSub(latest.getExposureMetrics() != null ? latest.getExposureMetrics().getNaturalRecommendationSub() : "-")
                 .competitiveScore(latest.getExposureMetrics() != null ? latest.getExposureMetrics().getCompetitiveScore() : 68)
                 .competitiveSub(latest.getExposureMetrics() != null ? latest.getExposureMetrics().getCompetitiveSub() : "-")
+                .perPlatformWhitelistMatchCount(globalHasWhitelistMode[0] ? globalWhitelistMatchCountAgg : null)
+                .perPlatformTotalSourceCount(globalHasWhitelistMode[0] ? globalTotalSourceCountAgg : null)
+                .perPlatformWhitelistMatchRate(globalHasWhitelistMode[0] && !globalPerPlatformWhitelistMatchRate.isEmpty() ? globalPerPlatformWhitelistMatchRate : null)
                 .build();
 
         List<AnalysisReportResponse.PlatformScoreCard> globalPlatformScoreCards = new ArrayList<>();

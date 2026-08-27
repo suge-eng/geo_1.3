@@ -104,6 +104,15 @@ public class TaskService {
     public Task createTask(List<String> aiPlatforms, List<String> questions, String title,
                           String brandName, String productName, List<String> competitors,
                           String executionFrequency, Boolean retryOnFailure, String scope) {
+        return createTask(aiPlatforms, questions, title, brandName, productName, competitors,
+                executionFrequency, retryOnFailure, scope, null);
+    }
+
+    @Transactional
+    public Task createTask(List<String> aiPlatforms, List<String> questions, String title,
+                          String brandName, String productName, List<String> competitors,
+                          String executionFrequency, Boolean retryOnFailure, String scope,
+                          List<String> whitelistUrls) {
         validateAiPlatforms(aiPlatforms);
         validateQuestions(questions);
         validateBrandName(brandName);
@@ -129,6 +138,13 @@ public class TaskService {
             task.setCompetitors(objectMapper.writeValueAsString(competitors));
         } catch (JsonProcessingException e) {
             log.warn("序列化竞争对手列表失败", e);
+        }
+        if (whitelistUrls != null && !whitelistUrls.isEmpty()) {
+            try {
+                task.setWhitelistUrls(objectMapper.writeValueAsString(whitelistUrls));
+            } catch (JsonProcessingException e) {
+                log.warn("序列化白名单URLs失败", e);
+            }
         }
 
         taskMapper.insert(task);

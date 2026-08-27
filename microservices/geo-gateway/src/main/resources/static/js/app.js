@@ -33,6 +33,9 @@ const __geoApp = createApp({
             },
             selectedFile: null,
             isDragOver: false,
+            whitelistFile: null,
+            whitelistUrls: [],
+            isWhitelistDragOver: false,
             aiPlatforms: [
                 { value: 'doubao', label: '豆包' },
                 { value: 'doubao_app', label: '豆包APP' },
@@ -320,6 +323,7 @@ const __geoApp = createApp({
             this.isSubmitting = true
             try {
                 const competitors = this.taskForm.competitors.filter(c => c.trim())
+                const whitelistUrls = this.whitelistUrls && this.whitelistUrls.length > 0 ? this.whitelistUrls : null
 
                 if (this.submitMode === 'manual') {
                     const questions = this.taskForm.questionsText.split('\n').filter(q => q.trim())
@@ -332,7 +336,8 @@ const __geoApp = createApp({
                         competitors: competitors,
                         executionFrequency: this.taskForm.executionFrequency,
                         retryOnFailure: this.taskForm.retryOnFailure,
-                        scope: 'LOCAL'
+                        scope: 'LOCAL',
+                        whitelistUrls: whitelistUrls
                     })
                 } else {
                     const formData = new FormData()
@@ -349,6 +354,9 @@ const __geoApp = createApp({
                     formData.append('executionFrequency', this.taskForm.executionFrequency)
                     formData.append('retryOnFailure', this.taskForm.retryOnFailure)
                     formData.append('scope', 'LOCAL')
+                    if (whitelistUrls && whitelistUrls.length > 0) {
+                        formData.append('whitelistUrls', JSON.stringify(whitelistUrls))
+                    }
 
                     await axios.post('/api/task/create/excel', formData, {
                         headers: {
@@ -433,10 +441,16 @@ const __geoApp = createApp({
                 retryOnFailure: false
             }
             this.selectedFile = null
+            this.whitelistFile = null
+            this.whitelistUrls = []
         },
 
         triggerFileInput() {
-            this.$refs.fileInput.click()
+            const el = this.$refs.fileInput
+            if (el) {
+                el.value = ''
+                setTimeout(() => el.click(), 0)
+            }
         },
 
         handleFileSelect(event) {
@@ -468,6 +482,63 @@ const __geoApp = createApp({
             this.selectedFile = null
             if (this.$refs.fileInput) {
                 this.$refs.fileInput.value = ''
+            }
+        },
+
+        triggerWhitelistFileInput() {
+            const el = this.$refs.whitelistFileInput
+            if (el) {
+                el.value = ''
+                setTimeout(() => el.click(), 0)
+            }
+        },
+
+        handleWhitelistFileSelect(event) {
+            const file = event.target.files[0]
+            if (file) {
+                this.validateAndSetWhitelistFile(file)
+            }
+        },
+
+        handleWhitelistDrop(event) {
+            this.isWhitelistDragOver = false
+            const file = event.dataTransfer.files[0]
+            if (file) {
+                this.validateAndSetWhitelistFile(file)
+            }
+        },
+
+        async validateAndSetWhitelistFile(file) {
+            const validExtensions = ['.xlsx', '.xls']
+            const extension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'))
+            if (!validExtensions.includes(extension)) {
+                this.showToast('请上传有效的Excel文件（.xlsx或.xls）', 'error')
+                return
+            }
+            this.whitelistFile = file
+            this.whitelistUrls = []
+
+            try {
+                const formData = new FormData()
+                formData.append('file', file)
+                const response = await axios.post('/api/task/parse-whitelist', formData, {
+                    headers: { 'Content-Type': 'multipart/form-data' }
+                })
+                if (response.data && response.data.data) {
+                    this.whitelistUrls = response.data.data
+                    this.showToast(`白名单解析成功，共 ${this.whitelistUrls.length} 个网址`, 'success')
+                }
+            } catch (error) {
+                console.error('白名单解析失败:', error)
+                this.showToast(error.response?.data?.message || '白名单解析失败', 'error')
+            }
+        },
+
+        clearWhitelistFile() {
+            this.whitelistFile = null
+            this.whitelistUrls = []
+            if (this.$refs.whitelistFileInput) {
+                this.$refs.whitelistFileInput.value = ''
             }
         },
 

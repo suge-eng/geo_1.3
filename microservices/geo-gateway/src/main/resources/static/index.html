@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI任务调度平台</title>
-    <script src="lib/vue.global.prod.js?v=20260826_handoff_v5"></script>
-    <script src="lib/axios.min.js?v=20260826_handoff_v5"></script>
-    <script src="lib/echarts.min.js?v=20260826_handoff_v5"></script>
-    <link rel="stylesheet" href="css/style.css?v=20260826_handoff_v5">
+    <script src="lib/vue.global.prod.js?v=20260827_whitelist_v1"></script>
+    <script src="lib/axios.min.js?v=20260827_whitelist_v1"></script>
+    <script src="lib/echarts.min.js?v=20260827_whitelist_v1"></script>
+    <link rel="stylesheet" href="css/style.css?v=20260827_whitelist_v1">
 </head>
 <body>
     <div id="app" class="container">
@@ -106,6 +106,44 @@
                 <label>竞争对手品牌名 (最多5个)</label>
                 <div class="competitors-container">
                     <input v-for="i in 5" :key="i" v-model="taskForm.competitors[i-1]" type="text" placeholder="竞争对手">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>白名单网址（Excel上传）</label>
+                <div 
+                    class="upload-area"
+                    :class="{ 'dragover': isWhitelistDragOver }"
+                    @click="triggerWhitelistFileInput()"
+                    @dragover.prevent="isWhitelistDragOver = true"
+                    @dragleave.prevent="isWhitelistDragOver = false"
+                    @drop.prevent="handleWhitelistDrop($event)"
+                    style="min-height: 80px; padding: 16px;"
+                >
+                    <div class="upload-icon">📋</div>
+                    <div class="upload-text">点击或拖拽白名单Excel文件到此处上传（可选）</div>
+                    <div class="upload-hint">支持 .xlsx 和 .xls 格式，第一列为网址域名（第一行为表头），如：baidu.com、zhihu.com</div>
+                    <div v-if="whitelistFile" class="upload-file-info">
+                        📁 {{ whitelistFile.name }} ({{ formatFileSize(whitelistFile.size) }})
+                    </div>
+                    <div v-if="whitelistUrls && whitelistUrls.length > 0" class="upload-file-info" style="color: #13a764;">
+                        ✅ 已解析 {{ whitelistUrls.length }} 个白名单网址
+                    </div>
+                </div>
+                <input 
+                    ref="whitelistFileInput"
+                    type="file" 
+                    accept=".xlsx,.xls" 
+                    style="display: none;"
+                    @change="handleWhitelistFileSelect($event)"
+                >
+                <div style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+                    <a href="/api/task/whitelist-template" style="display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: #667eea; text-decoration: none; cursor: pointer; padding: 6px 12px; border: 1px solid #667eea; border-radius: 6px; transition: all 0.2s;" onmouseover="this.style.background='#667eea'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#667eea'">
+                        📥 下载白名单模板
+                    </a>
+                    <button v-if="whitelistFile" @click="clearWhitelistFile()" class="btn btn-secondary" style="padding: 6px 12px; font-size: 13px;">
+                        清除白名单
+                    </button>
                 </div>
             </div>
 
@@ -916,7 +954,7 @@
         <div v-if="toast && toast.show" :class="['toast', toast.type]">{{ toast.message }}</div>
     </div>
 
-    <script src="js/config.js?v=20260826_handoff_v5"></script>
-    <script src="js/bootstrap.js?v=20260826_handoff_v5"></script>
+    <script src="js/config.js?v=20260827_whitelist_v1"></script>
+    <script src="js/bootstrap.js?v=20260827_whitelist_v1"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@
  */
 (function bootstrap() {
     const config = window.GEO_APP_CONFIG || { DEMO_MODE: false }
-    const version = '20260826_handoff_v5'
+    const version = '20260827_whitelist_v1'
 
     function loadScript(src) {
         return new Promise((resolve, reject) => {

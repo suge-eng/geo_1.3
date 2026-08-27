@@ -122,4 +122,77 @@ public class ExcelParseService {
             default -> null;
         };
     }
+
+    public List<String> parseWhitelistFromExcel(MultipartFile file) {
+        validateFile(file);
+
+        List<String> urls = new ArrayList<>();
+
+        try (InputStream is = file.getInputStream()) {
+            Workbook workbook = createWorkbook(file, is);
+
+            Sheet sheet = workbook.getSheetAt(0);
+            if (sheet == null) {
+                throw new BusinessException(ResultCode.BAD_REQUEST, "白名单Excel文件为空");
+            }
+
+            int firstDataRow = 1;
+            int lastRowNum = sheet.getLastRowNum();
+
+            for (int i = firstDataRow; i <= lastRowNum; i++) {
+                Row row = sheet.getRow(i);
+                if (row == null) {
+                    continue;
+                }
+
+                Cell cell = row.getCell(0);
+                if (cell == null) {
+                    continue;
+                }
+
+                String url = getCellValueAsString(cell);
+                if (url != null && !url.trim().isEmpty()) {
+                    String cleaned = normalizeWhitelistUrl(url.trim());
+                    if (cleaned != null && !cleaned.isEmpty()) {
+                        if (!urls.contains(cleaned)) {
+                            urls.add(cleaned);
+                        }
+                    }
+                }
+            }
+
+            workbook.close();
+
+            log.info("从白名单Excel文件解析出 {} 个网址", urls.size());
+            return urls;
+
+        } catch (IOException e) {
+            log.error("解析白名单Excel文件失败", e);
+            throw new BusinessException(ResultCode.INTERNAL_ERROR, "解析白名单Excel文件失败");
+        }
+    }
+
+    private String normalizeWhitelistUrl(String url) {
+        if (url == null || url.isEmpty()) {
+            return null;
+        }
+        String result = url.toLowerCase().trim();
+        if (result.startsWith("http://")) {
+            result = result.substring(7);
+        } else if (result.startsWith("https://")) {
+            result = result.substring(8);
+        }
+        if (result.startsWith("www.")) {
+            result = result.substring(4);
+        }
+        int slashIdx = result.indexOf('/');
+        if (slashIdx > 0) {
+            result = result.substring(0, slashIdx);
+        }
+        int queryIdx = result.indexOf('?');
+        if (queryIdx > 0) {
+            result = result.substring(0, queryIdx);
+        }
+        return result.trim();
+    }
 }

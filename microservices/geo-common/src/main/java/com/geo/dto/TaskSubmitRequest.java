@@ -35,6 +35,8 @@ public class TaskSubmitRequest {
 
     private String scope = "LOCAL";
 
+    private List<String> whitelistUrls;
+
     public List<String> getAiPlatforms() { return aiPlatforms; }
     public void setAiPlatforms(List<String> aiPlatforms) { this.aiPlatforms = aiPlatforms; }
     public List<String> getQuestions() { return questions; }
@@ -53,4 +55,6 @@ public class TaskSubmitRequest {
     public void setRetryOnFailure(Boolean retryOnFailure) { this.retryOnFailure = retryOnFailure; }
     public String getScope() { return scope; }
     public void setScope(String scope) { this.scope = scope; }
+    public List<String> getWhitelistUrls() { return whitelistUrls; }
+    public void setWhitelistUrls(List<String> whitelistUrls) { this.whitelistUrls = whitelistUrls; }
 }

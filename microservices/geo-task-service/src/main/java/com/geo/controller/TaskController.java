@@ -70,8 +70,9 @@ public class TaskController {
 
     @PostMapping("/create")
     public Result<Task> createTask(@Valid @RequestBody TaskSubmitRequest request) {
-        log.info("收到任务创建请求: aiPlatforms={}, questionCount={}, brandName={}, productName={}",
-                request.getAiPlatforms(), request.getQuestions().size(), request.getBrandName(), request.getProductName());
+        log.info("收到任务创建请求: aiPlatforms={}, questionCount={}, brandName={}, productName={}, whitelistUrlCount={}",
+                request.getAiPlatforms(), request.getQuestions().size(), request.getBrandName(), request.getProductName(),
+                request.getWhitelistUrls() != null ? request.getWhitelistUrls().size() : 0);
 
         Task task = taskService.createTask(
                 request.getAiPlatforms(),
@@ -82,10 +83,18 @@ public class TaskController {
                 request.getCompetitors(),
                 request.getExecutionFrequency(),
                 request.getRetryOnFailure(),
-                request.getScope()
+                request.getScope(),
+                request.getWhitelistUrls()
         );
         enrichTaskFields(task);
         return Result.success("任务创建成功", task);
+    }
+
+    @PostMapping(value = "/parse-whitelist", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<List<String>> parseWhitelist(@RequestParam("file") MultipartFile file) {
+        log.info("收到白名单解析请求: filename={}", file.getOriginalFilename());
+        List<String> urls = excelParseService.parseWhitelistFromExcel(file);
+        return Result.success(urls);
     }
 
     @PostMapping("/{taskNo}/submit")
@@ -210,10 +219,22 @@ public class TaskController {
             @RequestParam(value = "competitors", required = false) List<String> competitors,
             @RequestParam(value = "executionFrequency", defaultValue = "single") String executionFrequency,
             @RequestParam(value = "retryOnFailure", defaultValue = "false") Boolean retryOnFailure,
-            @RequestParam(value = "scope", defaultValue = "LOCAL") String scope) {
+            @RequestParam(value = "scope", defaultValue = "LOCAL") String scope,
+            @RequestParam(value = "whitelistUrls", required = false) String whitelistUrlsJson) {
 
-        log.info("收到Excel任务创建请求: filename={}, aiPlatforms={}, title={}, brandName={}, productName={}",
-                file.getOriginalFilename(), aiPlatforms, title, brandName, productName);
+        List<String> whitelistUrls = null;
+        if (whitelistUrlsJson != null && !whitelistUrlsJson.isEmpty()) {
+            try {
+                whitelistUrls = new com.fasterxml.jackson.databind.ObjectMapper()
+                        .readValue(whitelistUrlsJson, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+            } catch (Exception e) {
+                log.warn("解析白名单URLs JSON失败", e);
+            }
+        }
+
+        log.info("收到Excel任务创建请求: filename={}, aiPlatforms={}, title={}, brandName={}, productName={}, whitelistUrlCount={}",
+                file.getOriginalFilename(), aiPlatforms, title, brandName, productName,
+                whitelistUrls != null ? whitelistUrls.size() : 0);
 
         List<String> questions = excelParseService.parseQuestionsFromExcel(file);
         log.info("从Excel解析出 {} 个问题", questions.size());
@@ -227,7 +248,8 @@ public class TaskController {
                 competitors,
                 executionFrequency,
                 retryOnFailure,
-                scope
+                scope,
+                whitelistUrls
         );
         enrichTaskFields(task);
         return Result.success("Excel任务创建成功", task);
@@ -272,6 +294,62 @@ public class TaskController {
                     .body(content);
         } catch (Exception e) {
             log.error("生成Excel模板失败", e);
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+
+    @GetMapping("/whitelist-template")
+    public ResponseEntity<byte[]> downloadWhitelistTemplate() {
+        try (Workbook workbook = new XSSFWorkbook()) {
+            Sheet sheet = workbook.createSheet("白名单模板");
+
+            Row headerRow = sheet.createRow(0);
+            Cell headerCell = headerRow.createCell(0);
+            headerCell.setCellValue("网址域名");
+
+            CellStyle headerStyle = workbook.createCellStyle();
+            Font headerFont = workbook.createFont();
+            headerFont.setBold(true);
+            headerStyle.setFont(headerFont);
+            headerStyle.setFillForegroundColor(IndexedColors.GREY_25_PERCENT.getIndex());
+            headerStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+            headerCell.setCellStyle(headerStyle);
+
+            String[] samples = {
+                "baidu.com",
+                "zhihu.com",
+                "weibo.com",
+                "163.com",
+                "bilibili.com",
+                "sina.com.cn",
+                "sohu.com",
+                "people.com.cn",
+                "xinhuanet.com"
+            };
+            for (int i = 0; i < samples.length; i++) {
+                Row sampleRow = sheet.createRow(i + 1);
+                Cell sampleCell = sampleRow.createCell(0);
+                sampleCell.setCellValue(samples[i]);
+            }
+
+            sheet.setColumnWidth(0, 6000);
+
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            workbook.write(baos);
+            byte[] content = baos.toByteArray();
+
+            String filename = URLEncoder.encode("白名单模板.xlsx", StandardCharsets.UTF_8)
+                    .replace("+", "%20");
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"" + filename + "\"; filename*=UTF-8''" + filename)
+                    .contentType(MediaType.parseMediaType(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                    .contentLength(content.length)
+                    .body(content);
+        } catch (Exception e) {
+            log.error("生成白名单模板失败", e);
             return ResponseEntity.internalServerError().build();
         }
     }
