@@ -25,6 +25,7 @@ public class TaskResultVO {
     private LocalDateTime queryTime;
     private java.util.List<String> brandRanking;
     private String sentiment;
+    private String sentimentSource;
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -67,6 +68,8 @@ public class TaskResultVO {
     public void setBrandRanking(java.util.List<String> brandRanking) { this.brandRanking = brandRanking; }
     public String getSentiment() { return sentiment; }
     public void setSentiment(String sentiment) { this.sentiment = sentiment; }
+    public String getSentimentSource() { return sentimentSource; }
+    public void setSentimentSource(String sentimentSource) { this.sentimentSource = sentimentSource; }
 
     public static Builder builder() { return new Builder(); }
 
@@ -91,6 +94,7 @@ public class TaskResultVO {
         public Builder queryTime(LocalDateTime queryTime) { vo.setQueryTime(queryTime); return this; }
         public Builder brandRanking(java.util.List<String> brandRanking) { vo.setBrandRanking(brandRanking); return this; }
         public Builder sentiment(String sentiment) { vo.setSentiment(sentiment); return this; }
+        public Builder sentimentSource(String sentimentSource) { vo.setSentimentSource(sentimentSource); return this; }
         public TaskResultVO build() { return vo; }
     }
 }

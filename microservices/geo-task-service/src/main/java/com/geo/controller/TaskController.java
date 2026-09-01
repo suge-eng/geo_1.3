@@ -177,6 +177,30 @@ public class TaskController {
         return Result.success("所有任务已重新调度", task);
     }
 
+    @PostMapping("/{taskNo}/stop")
+    public Result<Task> stopTask(@PathVariable String taskNo) {
+        log.info("收到终止任务请求: taskNo={}", taskNo);
+        Task task = taskService.stopTask(taskNo);
+        enrichTaskFields(task);
+        return Result.success("任务已终止", task);
+    }
+
+    @PostMapping("/{taskNo}/pause")
+    public Result<Task> pauseTask(@PathVariable String taskNo) {
+        log.info("收到暂停任务请求: taskNo={}", taskNo);
+        Task task = taskService.pauseTask(taskNo);
+        enrichTaskFields(task);
+        return Result.success("任务已暂停", task);
+    }
+
+    @PostMapping("/{taskNo}/resume")
+    public Result<Task> resumeTask(@PathVariable String taskNo) {
+        log.info("收到恢复任务请求: taskNo={}", taskNo);
+        Task task = taskService.resumeTask(taskNo);
+        enrichTaskFields(task);
+        return Result.success("任务已恢复", task);
+    }
+
     @PostMapping("/{taskNo}/retry/success")
     public Result<Task> retrySuccessTasks(@PathVariable String taskNo) {
         log.info("收到重试成功任务请求: taskNo={}", taskNo);

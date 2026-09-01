@@ -7,6 +7,13 @@ const MOCK_DATA = window.GEO_MOCK_DATA || null
 if (APP_CONFIG.API_BASE_URL) {
     axios.defaults.baseURL = APP_CONFIG.API_BASE_URL
 }
+axios.defaults.headers.post['Content-Type'] = 'application/json'
+axios.interceptors.request.use(config => {
+    if (config.method === 'post' && config.data === undefined) {
+        config.data = {}
+    }
+    return config
+})
 
 const __geoApp = createApp({
     data() {
@@ -107,6 +114,12 @@ const __geoApp = createApp({
             voicePlatform: 'ALL',
             radarMetric: 'mentionRate',
             keywordCloudMode: 'positive',
+            // ========== 任务池看板数据（不需要看板时，连同 methods.loadPool / mounted 轮询一起注释掉）==========
+            pool: { statusCount: [], platformCount: [], workerCount: [], runningUnits: [] },
+            poolLoading: false,
+            poolInterval: null,
+            poolDialect: { PENDING: '排队中', RUNNING: '执行中', SUCCESS: '成功', FAILED: '失败', PARTIAL_FAILED: '部分失败', CANCELLED: '已取消', TIMEOUT: '超时' },
+            // ========== 任务池看板数据 END ==========
             activeChartTab: '',
             chartRefs: {},
             reportHistoryTask: null,
@@ -273,6 +286,10 @@ const __geoApp = createApp({
     },
     mounted() {
         this.loadTaskList()
+        // ========== 任务池看板轮询（不需要看板时，把下面 3 行注释掉即可）==========
+        this.loadPool()
+        this.poolInterval = setInterval(() => this.loadPool(), 5000)
+        // ========== 任务池看板轮询 END ==========
     },
     watch: {
         reportData() {
@@ -312,6 +329,7 @@ const __geoApp = createApp({
     beforeUnmount() {
         if (this.progressInterval) clearInterval(this.progressInterval)
         if (this.resultInterval) clearInterval(this.resultInterval)
+        if (this.poolInterval) clearInterval(this.poolInterval)
     },
     methods: {
         async createTask() {
@@ -596,6 +614,36 @@ const __geoApp = createApp({
             }
         },
 
+        async pauseTask(task) {
+            if (DEMO_MODE && task.isDemo) {
+                task.status = 'PAUSED'
+                this.showToast('演示任务已暂停', 'success')
+                return
+            }
+            try {
+                await axios.post(`/api/task/${task.taskNo}/pause`)
+                this.showToast('任务已暂停', 'success')
+                this.loadTaskList()
+            } catch (error) {
+                this.showToast(error.response?.data?.message || '暂停失败', 'error')
+            }
+        },
+
+        async resumeTask(task) {
+            if (DEMO_MODE && task.isDemo) {
+                task.status = 'PROCESSING'
+                this.showToast('演示任务已恢复', 'success')
+                return
+            }
+            try {
+                await axios.post(`/api/task/${task.taskNo}/resume`)
+                this.showToast('任务已恢复', 'success')
+                this.loadTaskList()
+            } catch (error) {
+                this.showToast(error.response?.data?.message || '恢复失败', 'error')
+            }
+        },
+
         async searchTasks() {
             if (DEMO_MODE) {
                 const keyword = this.searchKeyword.trim().toLowerCase()
@@ -638,6 +686,33 @@ const __geoApp = createApp({
                 this.showToast(error.response?.data?.message || '加载任务列表失败', 'error')
             }
         },
+
+        // ========== 任务池看板（不需要看板时，把本方法注释掉）==========
+        async loadPool() {
+            if (DEMO_MODE) return
+            if (this.activeTab !== 'pool') return   // 不在任务池页时不请求，减轻压力
+            this.poolLoading = true
+            try {
+                const res = await axios.get('/api/rpa/pool', { params: { _t: Date.now() } })
+                const data = res.data?.data || {}
+                this.pool = {
+                    statusCount: data.statusCount || [],
+                    platformCount: data.platformCount || [],
+                    workerCount: data.workerCount || [],
+                    runningUnits: data.runningUnits || []
+                }
+            } catch (error) {
+                this.pool = { statusCount: [], platformCount: [], workerCount: [], runningUnits: [] }
+            } finally {
+                this.poolLoading = false
+            }
+        },
+        poolStatusName(code) { return this.poolDialect[code] || code || '未知' },
+        poolPlatformName(code) {
+            const p = (this.aiPlatforms || []).find(x => x.value === code)
+            return p ? p.label : code
+        },
+        // ========== 任务池看板 END ==========
 
         async selectTask(task) {
             this.selectedTask = task
@@ -1473,6 +1548,17 @@ const __geoApp = createApp({
             if (typeof rd.historyReportCount !== 'number') rd.historyReportCount = 0
             if (!Array.isArray(rd.screenshotUrls)) rd.screenshotUrls = []
 
+            if (rd.aiSentimentMap && typeof rd.aiSentimentMap === 'object' && Array.isArray(this.taskResults)) {
+                const aiMap = rd.aiSentimentMap
+                for (const result of this.taskResults) {
+                    const key = String(result.id)
+                    if (aiMap[key]) {
+                        result.sentiment = aiMap[key]
+                        result.sentimentSource = 'ai'
+                    }
+                }
+            }
+
             const rankings = rd.rankings
             const sourceRanking = rankings.find(r => r && r.id === 'source_platform_ranking')
             if (sourceRanking && Array.isArray(sourceRanking.items)) {
@@ -1968,7 +2054,7 @@ const __geoApp = createApp({
                     return
                 }
                 try {
-                    const res = await axios.post(`/api/analysis/${this.selectedTask.taskNo}/regenerate`)
+                    const res = await axios.post(`/api/analysis/${this.selectedTask.taskNo}/regenerate`, {})
                     await this.handleReportResponse(res, platformOptionsPromise)
                     this.showToast('报告已重新生成', 'success')
                 } catch (error) {
@@ -2636,7 +2722,7 @@ const __geoApp = createApp({
                 }
 
                 try {
-                    const res = await axios.post(`/api/analysis/${task.taskNo}/reports/global/generate`)
+                    const res = await axios.post(`/api/analysis/${task.taskNo}/reports/global/generate`, {})
                     this.reportData = res.data.data || {}
                     this.normalizeReportData()
                     await platformOptionsPromise

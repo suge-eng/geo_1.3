@@ -362,8 +362,9 @@ public class AnalysisService {
             };
         }
 
+        final Map<Long, String> aiSentimentMap = new ConcurrentHashMap<>();
         final Map<Long, List<String>> aiBrandRankings = aiEnabled
-                ? batchAnalyzeBrandRankings(validResults, selfBrand, competitorBrands, aiProgress)
+                ? batchAnalyzeBrandRankings(validResults, selfBrand, competitorBrands, aiProgress, aiSentimentMap)
                 : new HashMap<>();
 
         if (progressCallback != null) progressCallback.accept(75);
@@ -389,7 +390,7 @@ public class AnalysisService {
         Map<String, BrandComparisonTable> perPlatformBrandComparison = buildPerPlatformBrandComparison(
                 validResults, selfBrand, competitorBrands, aiBrandRankings);
         Map<String, Integer> perPlatformSelfMentionCount = computePerPlatformSelfMentionCount(validResults, selfBrand, aiBrandRankings);
-        int[] posRep = computePositiveReputationCounts(validResults, selfBrand, aiBrandRankings);
+        int[] posRep = computePositiveReputationCounts(validResults, selfBrand, aiBrandRankings, aiSentimentMap);
         int posPositive = posRep[0];
         int posMentioned = posRep[1];
 
@@ -432,6 +433,13 @@ public class AnalysisService {
             }
         }
 
+        Map<String, String> aiSentimentJson = new HashMap<>();
+        for (Map.Entry<Long, String> e : aiSentimentMap.entrySet()) {
+            if (e.getKey() != null) {
+                aiSentimentJson.put(String.valueOf(e.getKey()), e.getValue());
+            }
+        }
+
         List<AnalysisReportResponse.PlatformScoreCard> platformScoreCards = buildPlatformScoreCardsFromPerPlatform(
                 perPlatformBrandComparison, selfBrand, platforms.stream().map(p -> normalizeAiPlatformCode(p)).filter(Objects::nonNull).collect(Collectors.toList()));
 
@@ -461,6 +469,7 @@ public class AnalysisService {
                 .competitionRanking(competitionRanking)
                 .keywordCloud(keywordCloud)
                 .platformScoreCards(platformScoreCards)
+                .aiSentimentMap(aiSentimentJson)
                 .build();
 
         try {
@@ -1340,10 +1349,15 @@ public class AnalysisService {
     }
 
     private int[] computePositiveReputationCounts(List<TaskResult> validResults, String selfBrand, Map<Long, List<String>> aiBrandRankings) {
+        return computePositiveReputationCounts(validResults, selfBrand, aiBrandRankings, null);
+    }
+
+    private int[] computePositiveReputationCounts(List<TaskResult> validResults, String selfBrand, Map<Long, List<String>> aiBrandRankings, Map<Long, String> aiSentimentMap) {
         int mentioned = 0;
         int positive = 0;
         if (validResults == null || selfBrand == null || selfBrand.isEmpty()) return new int[]{0, 0};
         Map<Long, List<String>> rankingMap = aiBrandRankings != null ? aiBrandRankings : new HashMap<>();
+        Map<Long, String> sentimentMap = aiSentimentMap != null ? aiSentimentMap : new HashMap<>();
         for (TaskResult r : validResults) {
             if (r == null) continue;
             boolean isMentioned = false;
@@ -1356,7 +1370,12 @@ public class AnalysisService {
             }
             if (!isMentioned) continue;
             mentioned++;
-            String sent = com.geo.common.SentimentUtils.analyzeBrandSentiment(r.getAnswerText(), selfBrand);
+            String sent;
+            if (sentimentMap.containsKey(r.getId())) {
+                sent = sentimentMap.get(r.getId());
+            } else {
+                sent = com.geo.common.SentimentUtils.analyzeBrandSentiment(r.getAnswerText(), selfBrand);
+            }
             if ("positive".equals(sent)) positive++;
         }
         return new int[]{positive, mentioned};
@@ -1834,14 +1853,23 @@ public class AnalysisService {
     private Map<Long, List<String>> batchAnalyzeBrandRankings(List<TaskResult> validResults,
                                                               String selfBrand,
                                                               List<String> competitorBrands) {
-        return batchAnalyzeBrandRankings(validResults, selfBrand, competitorBrands, null);
+        return batchAnalyzeBrandRankings(validResults, selfBrand, competitorBrands, null, null);
     }
 
     private Map<Long, List<String>> batchAnalyzeBrandRankings(List<TaskResult> validResults,
                                                               String selfBrand,
                                                               List<String> competitorBrands,
                                                               BiConsumer<Integer, Integer> progressCallback) {
+        return batchAnalyzeBrandRankings(validResults, selfBrand, competitorBrands, progressCallback, null);
+    }
+
+    private Map<Long, List<String>> batchAnalyzeBrandRankings(List<TaskResult> validResults,
+                                                              String selfBrand,
+                                                              List<String> competitorBrands,
+                                                              BiConsumer<Integer, Integer> progressCallback,
+                                                              Map<Long, String> sentimentMap) {
         Map<Long, List<String>> rankingMap = new ConcurrentHashMap<>();
+        Map<Long, String> aiSentimentMap = sentimentMap != null ? sentimentMap : new ConcurrentHashMap<>();
         if (!aiEnabled || aiApiKey == null || aiApiKey.isEmpty() || "your-api-key-here".equals(aiApiKey)) {
             return rankingMap;
         }
@@ -1867,7 +1895,7 @@ public class AnalysisService {
 
         int totalBatches = batches.size();
         int effectiveConcurrency = Math.max(1, Math.min(aiMaxConcurrency, totalBatches));
-        log.info("AI品牌排名提取开始: 总结果{}条, 批次数{}个, 每批{}条, 并发{}",
+        log.info("AI品牌排名情感分析开始: 总结果{}条, 批次数{}个, 每批{}条, 并发{}",
                 validResults.size(), totalBatches, batchSize, effectiveConcurrency);
 
         AtomicInteger completedBatches = new AtomicInteger(0);
@@ -1890,14 +1918,14 @@ public class AnalysisService {
                 try {
                     semaphore.acquire();
                     try {
-                        boolean ok = processBrandRankingBatchOnce(batch, hintBrands, url, rankingMap);
+                        boolean ok = processBrandRankingBatchOnce(batch, hintBrands, url, rankingMap, aiSentimentMap);
                         if (!ok) {
                             if (aiFailoverToTextMatch) {
                                 failedBatches.incrementAndGet();
                                 log.debug("批次{}/{}失败（大小{}），跳过，将使用文本匹配兜底", idx + 1, totalBatches, batch.size());
                             } else {
                                 for (TaskResult single : batch) {
-                                    processBrandRankingBatchOnce(Collections.singletonList(single), hintBrands, url, rankingMap);
+                                    processBrandRankingBatchOnce(Collections.singletonList(single), hintBrands, url, rankingMap, aiSentimentMap);
                                 }
                             }
                         }
@@ -1908,7 +1936,7 @@ public class AnalysisService {
                             progressCallback.accept(done, totalBatches);
                         }
                         if (done % Math.max(1, totalBatches / 10) == 0 || done == totalBatches) {
-                            log.info("AI品牌排名进度: {}/{} 批次完成", done, totalBatches);
+                            log.info("AI品牌排名情感进度: {}/{} 批次完成", done, totalBatches);
                         }
                     }
                 } catch (InterruptedException e) {
@@ -1934,25 +1962,29 @@ public class AnalysisService {
             }
         }
 
-        log.info("AI品牌排名提取完成: 成功{}/{}结果, 失败{}批次",
-                rankingMap.size(), validResults.size(), failedBatches.get());
+        log.info("AI品牌排名情感分析完成: 排名{}条, 情感{}条, 总{}结果, 失败{}批次",
+                rankingMap.size(), aiSentimentMap.size(), validResults.size(), failedBatches.get());
         return rankingMap;
     }
 
     private boolean processBrandRankingBatchOnce(List<TaskResult> batch, List<String> hintBrands,
-                                                  String url, Map<Long, List<String>> rankingMap) {
+                                                  String url, Map<Long, List<String>> rankingMap,
+                                                  Map<Long, String> sentimentMap) {
         for (int attempt = 1; attempt <= AI_MAX_RETRIES; attempt++) {
             try {
                 StringBuilder prompt = new StringBuilder();
-                prompt.append("你是一个品牌排名提取专家。请从以下每一段AI回答中识别出所有提到的品牌，并按它们在回答中实际出现的推荐/排名顺序输出。\n");
-                prompt.append("自主品牌参考（仅作提示，回答中提到的其他品牌也必须提取）：").append(String.join("、", hintBrands)).append("\n\n");
+                prompt.append("你是一个品牌分析专家。请对以下每一段AI回答进行品牌排名提取和情感分析。\n");
+                prompt.append("自主品牌参考: ").append(String.join("、", hintBrands)).append("\n\n");
                 prompt.append("要求：\n");
-                prompt.append("1. 只提取回答中明确提到的品牌名；\n");
-                prompt.append("2. 顺序严格按照回答中的推荐/排名先后；\n");
-                prompt.append("3. 如果回答中没有排名形式但提到多个品牌，按首次出现顺序排列；\n");
-                prompt.append("4. 只返回纯JSON数组，不要任何解释或多余文字。\n\n");
+                prompt.append("1. 品牌排名: 提取回答中提到的所有品牌，按推荐/排名顺序排列；\n");
+                prompt.append("2. 情感分析: 判断回答对自主品牌的情感倾向（positive=正面推荐、negative=负面批评、neutral=中性客观）；\n");
+                prompt.append("   情感判断注意：\n");
+                prompt.append("   a. 关注对该品牌的整体态度，而非单句情感；\n");
+                prompt.append("   b. 双重否定表肯定（如'不差'=positive）；\n");
+                prompt.append("   c. 区分'有瑕疵但推荐'和'有优点但不推荐'，以整体推荐倾向为准；\n");
+                prompt.append("   d. 如果品牌只是被客观提及而无评价，返回neutral。\n\n");
                 prompt.append("返回格式示例：\n");
-                prompt.append("{\"results\":[{\"id\":123,\"ranking\":[\"品牌A\",\"品牌B\",\"品牌C\"]},{\"id\":456,\"ranking\":[]}]}\n\n");
+                prompt.append("{\"results\":[{\"id\":123,\"ranking\":[\"品牌A\",\"品牌B\"],\"sentiment\":\"positive\"},{\"id\":456,\"ranking\":[],\"sentiment\":\"neutral\"}]}\n\n");
                 prompt.append("以下是待分析的回答内容：\n");
 
                 for (TaskResult r : batch) {
@@ -2024,7 +2056,8 @@ public class AnalysisService {
                     for (Map<String, Object> pr : parsedResults) {
                         Object idObj = pr.get("id");
                         Object rankingObj = pr.get("ranking");
-                        if (idObj == null || !(rankingObj instanceof List)) continue;
+                        Object sentimentObj = pr.get("sentiment");
+                        if (idObj == null) continue;
 
                         Long rid = null;
                         try {
@@ -2037,14 +2070,23 @@ public class AnalysisService {
 
                         if (rid == null) continue;
 
-                        List<String> ranking = new ArrayList<>();
-                        for (Object o : (List<?>) rankingObj) {
-                            if (o != null) {
-                                String s = String.valueOf(o).trim();
-                                if (!s.isEmpty()) ranking.add(s);
+                        if (rankingObj instanceof List) {
+                            List<String> ranking = new ArrayList<>();
+                            for (Object o : (List<?>) rankingObj) {
+                                if (o != null) {
+                                    String s = String.valueOf(o).trim();
+                                    if (!s.isEmpty()) ranking.add(s);
+                                }
+                            }
+                            rankingMap.put(rid, ranking);
+                        }
+
+                        if (sentimentObj != null) {
+                            String sent = String.valueOf(sentimentObj).trim().toLowerCase();
+                            if ("positive".equals(sent) || "negative".equals(sent) || "neutral".equals(sent)) {
+                                sentimentMap.put(rid, sent);
                             }
                         }
-                        rankingMap.put(rid, ranking);
                     }
                     return true;
                 } catch (Exception parseEx) {

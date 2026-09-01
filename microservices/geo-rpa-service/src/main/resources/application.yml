@@ -35,30 +35,33 @@ spring:
     redis:
       host: localhost
       port: 6380
-      password: redis123
+      password: "123456"
       timeout: 10s
-
-  rabbitmq:
-    host: localhost
-    port: 5673
-    username: geo
-    password: geo123
-    virtual-host: /
-    connection-timeout: 10s
-    listener:
-      simple:
-        acknowledge-mode: auto
-        concurrency: 5
-        max-concurrency: 10
-        retry:
-          enabled: true
-          max-attempts: 3
-          initial-interval: 1000ms
 
   servlet:
     multipart:
       max-file-size: 50MB
       max-request-size: 100MB
+
+  # ===== 邮件 SMTP 配置（卡住通知用）=====
+  # 请把下面的 host/port/username/password 改成你自己邮箱的 SMTP 信息。
+  # QQ 邮箱：host=smtp.qq.com port=465 username=你的QQ号 password=你的授权码
+  # 163邮箱：host=smtp.163.com port=465 username=你的163账号 password=你的授权码
+  # 若不想用邮件通知，把 geo.rpa.notify.enabled 改成 false 即可（无需本配置）。
+  mail:
+    host: smtp.qq.com
+    port: 465
+    username: 1926491659@qq.com
+    password: ydddsogvpcwzeehb
+    protocol: smtps
+    properties:
+      mail:
+        smtp:
+          ssl:
+            enable: true
+          auth: true
+          starttls:
+            enable: true
 
 mybatis-plus:
   configuration:
@@ -80,7 +83,6 @@ minio:
 logging:
   level:
     com.geo: DEBUG
-    org.springframework.amqp: INFO
 
 geo:
   rpa:
@@ -88,3 +90,16 @@ geo:
     request-timeout-ms: 120000
     rate-limit:
       max-requests-per-minute: 60
+    worker:
+      # 单元认领后的租约时长（秒），worker 心跳续约
+      lease-seconds: 1200
+      # 清扫器回收租约过期单元
+      reclaim-ms: 30000
+      reclaim-initial-ms: 10000
+    notify:
+      # 任务「卡住」邮件通知总开关。false=关闭（不会发任何邮件，也不影响其他功能）
+      enabled: true
+      # 判卡住阈值（分钟）：RUNNING 超过该时长仍未回调完成，即判定卡住并发邮件
+      stuck-minutes: 5
+      # 邮件收件人（可多个，逗号分隔）
+      to: "1926491659@qq.com"

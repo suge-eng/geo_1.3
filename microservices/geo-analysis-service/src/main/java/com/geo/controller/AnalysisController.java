@@ -5,6 +5,7 @@ import com.geo.dto.AnalysisReportResponse;
 import com.geo.service.AnalysisService;
 import com.geo.service.AnalysisService.ReportGenStatus;
 import com.geo.service.AnalysisService.ReportGenerationStatus;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -12,9 +13,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.BufferedReader;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/analysis")
@@ -40,7 +43,17 @@ public class AnalysisController {
     public ResponseEntity<Result<?>> regenerateReport(
             @PathVariable String taskNo,
             @RequestParam(value = "async", required = false) Boolean asyncParam,
-            @RequestBody(required = false) Map<String, Object> options) {
+            HttpServletRequest request) {
+        Map<String, Object> options = null;
+        try {
+            BufferedReader reader = request.getReader();
+            String rawBody = reader.lines().collect(Collectors.joining("\n"));
+            if (rawBody != null && !rawBody.trim().isEmpty()) {
+                options = new com.fasterxml.jackson.databind.ObjectMapper().readValue(rawBody, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            }
+        } catch (Exception e) {
+            log.warn("解析请求体失败，忽略: {}", e.getMessage());
+        }
         log.info("重新生成分析报告: taskNo={}, async={}, options={}", taskNo, asyncParam, options);
         return handleReportRequest(taskNo, true, asyncParam);
     }

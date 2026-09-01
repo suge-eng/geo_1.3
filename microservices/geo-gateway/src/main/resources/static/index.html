@@ -25,7 +25,65 @@
         <div class="tabs page-tabs">
             <div :class="activeTab === 'submit' ? 'tab active' : 'tab'" @click="activeTab = 'submit'; currentView = 'list'">提交任务</div>
             <div :class="activeTab === 'list' ? 'tab active' : 'tab'" @click="activeTab = 'list'; currentView = 'list'; loadTaskList()">任务列表</div>
+            <!-- ===== 任务池看板：不需要看板时，把这里及下方对应区块整体注释掉 ===== -->
+            <!-- POOL_VIEW_START -->
+            <div :class="activeTab === 'pool' ? 'tab active' : 'tab'" @click="activeTab = 'pool'; loadPool()">任务池</div>
+            <!-- POOL_VIEW_END -->
         </div>
+
+        <!-- ===== 任务池看板（不需要时连同上面 tab 一起注释掉即可）===== -->
+        <!-- POOL_VIEW_START -->
+        <div v-if="activeTab === 'pool'" class="card pool-card">
+            <div class="card-header" style="justify-content:space-between;align-items:center;">
+                <h2 class="card-title">任务池看板</h2>
+                <button @click="loadPool" class="btn btn-secondary" :disabled="poolLoading">{{ poolLoading ? '加载中…' : '刷新' }}</button>
+            </div>
+
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:18px;">
+                <div v-for="s in pool.statusCount" :key="s.name" class="pool-stat">
+                    <div class="pool-stat-num">{{ s.value }}</div>
+                    <div class="pool-stat-label">{{ poolStatusName(s.name) }}</div>
+                </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;">
+                <div>
+                    <h4 style="margin:0 0 10px;font-size:14px;">按平台分布</h4>
+                    <table class="pool-table">
+                        <tr><th>平台</th><th>单元数</th></tr>
+                        <tr v-for="p in pool.platformCount" :key="p.name">
+                            <td>{{ poolPlatformName(p.name) }}</td><td>{{ p.value }}</td>
+                        </tr>
+                    </table>
+                </div>
+                <div>
+                    <h4 style="margin:0 0 10px;font-size:14px;">按执行机器（RUNNING）</h4>
+                    <table class="pool-table">
+                        <tr><th>机器</th><th>执行中单元</th></tr>
+                        <tr v-for="w in pool.workerCount" :key="w.name">
+                            <td>{{ w.name }}</td><td>{{ w.value }}</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h4 style="margin:0 0 10px;font-size:14px;">当前执行中单元（按开始时间排序）</h4>
+            <table class="pool-table" style="width:100%;">
+                <tr>
+                    <th>单元ID</th><th>任务号</th><th>平台</th><th>执行机器</th><th>开始时间</th><th>问题</th>
+                </tr>
+                <tr v-for="u in pool.runningUnits" :key="u.id">
+                    <td>{{ u.id }}</td>
+                    <td>{{ u.taskNo }}</td>
+                    <td>{{ poolPlatformName(u.aiPlatform) }}</td>
+                    <td>{{ u.assignee }}</td>
+                    <td>{{ u.startedAt }}</td>
+                    <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="u.questionText">{{ u.questionText }}</td>
+                </tr>
+                <tr v-if="!pool.runningUnits.length"><td colspan="6" style="text-align:center;color:#999;">暂无执行中单元</td></tr>
+            </table>
+        </div>
+        <!-- POOL_VIEW_END -->
 
         <!-- 提交任务表单 -->
         <div v-if="activeTab === 'submit'" class="card create-card">
@@ -242,7 +300,13 @@
                         <button v-if="task.status === 'COMPLETED'" @click="submitTaskAgain(task)" class="btn btn-submit">
                             重新提交
                         </button>
-                        <button v-if="task.status === 'RUNNING' || task.status === 'PROCESSING'" @click="stopTask(task)" class="btn btn-stop">
+                        <button v-if="task.status === 'RUNNING' || task.status === 'PROCESSING'" @click="pauseTask(task)" class="btn btn-pause">
+                            暂停任务
+                        </button>
+                        <button v-if="task.status === 'PAUSED'" @click="resumeTask(task)" class="btn btn-submit">
+                            恢复任务
+                        </button>
+                        <button v-if="task.status === 'RUNNING' || task.status === 'PROCESSING' || task.status === 'PAUSED'" @click="stopTask(task)" class="btn btn-stop">
                             终止任务
                         </button>
                         <button v-if="task.status === 'COMPLETED'" @click="openReportHistory(task)" class="btn btn-history">
@@ -354,6 +418,9 @@
                             <span 
                                 v-else-if="result.sentiment === 'negative'" 
                                 style="color: #dc3545;">●</span>
+                            <span 
+                                v-else-if="result.sentiment === 'neutral'" 
+                                style="color: #fd7e14;">●</span>
                             <span 
                                 v-else 
                                 style="color: #adb5bd;">●</span>

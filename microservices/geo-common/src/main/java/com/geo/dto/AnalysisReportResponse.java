@@ -33,6 +33,7 @@ public class AnalysisReportResponse {
     private BrandComparisonTable brandComparison;
     private ExposureMetrics exposureMetrics;
     private Map<String, List<String>> resultBrandRankings;
+    private Map<String, String> aiSentimentMap;
     private KeywordCloud keywordCloud;
 
     public KeywordCloud getKeywordCloud() { return keywordCloud; }
@@ -83,6 +84,8 @@ public class AnalysisReportResponse {
     public void setExposureMetrics(ExposureMetrics exposureMetrics) { this.exposureMetrics = exposureMetrics; }
     public Map<String, List<String>> getResultBrandRankings() { return resultBrandRankings; }
     public void setResultBrandRankings(Map<String, List<String>> resultBrandRankings) { this.resultBrandRankings = resultBrandRankings; }
+    public Map<String, String> getAiSentimentMap() { return aiSentimentMap; }
+    public void setAiSentimentMap(Map<String, String> aiSentimentMap) { this.aiSentimentMap = aiSentimentMap; }
     private Map<String, BrandComparisonTable> perPlatformBrandComparison;
     public Map<String, BrandComparisonTable> getPerPlatformBrandComparison() { return perPlatformBrandComparison; }
     public void setPerPlatformBrandComparison(Map<String, BrandComparisonTable> perPlatformBrandComparison) { this.perPlatformBrandComparison = perPlatformBrandComparison; }
@@ -154,6 +157,7 @@ public class AnalysisReportResponse {
         public Builder brandComparison(BrandComparisonTable brandComparison) { resp.brandComparison = brandComparison; return this; }
         public Builder exposureMetrics(ExposureMetrics exposureMetrics) { resp.exposureMetrics = exposureMetrics; return this; }
         public Builder resultBrandRankings(Map<String, List<String>> resultBrandRankings) { resp.resultBrandRankings = resultBrandRankings; return this; }
+        public Builder aiSentimentMap(Map<String, String> aiSentimentMap) { resp.aiSentimentMap = aiSentimentMap; return this; }
         public Builder perPlatformBrandComparison(Map<String, BrandComparisonTable> perPlatformBrandComparison) { resp.perPlatformBrandComparison = perPlatformBrandComparison; return this; }
         public Builder competitionRanking(List<CompetitionRankingItem> competitionRanking) { resp.competitionRanking = competitionRanking; return this; }
         public Builder keywordCloud(KeywordCloud keywordCloud) { resp.keywordCloud = keywordCloud; return this; }

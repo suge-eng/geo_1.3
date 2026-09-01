@@ -23,6 +23,10 @@ public class TaskResult {
     private Long durationMs;
     private Integer rpaRetryCount;
     private Long accountId;
+    private String assignee;
+    private LocalDateTime leaseExpiresAt;
+    private LocalDateTime startedAt;
+    private Integer stuckNotified;
 
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
@@ -59,6 +63,14 @@ public class TaskResult {
     public void setRpaRetryCount(Integer rpaRetryCount) { this.rpaRetryCount = rpaRetryCount; }
     public Long getAccountId() { return accountId; }
     public void setAccountId(Long accountId) { this.accountId = accountId; }
+    public String getAssignee() { return assignee; }
+    public void setAssignee(String assignee) { this.assignee = assignee; }
+    public LocalDateTime getLeaseExpiresAt() { return leaseExpiresAt; }
+    public void setLeaseExpiresAt(LocalDateTime leaseExpiresAt) { this.leaseExpiresAt = leaseExpiresAt; }
+    public LocalDateTime getStartedAt() { return startedAt; }
+    public void setStartedAt(LocalDateTime startedAt) { this.startedAt = startedAt; }
+    public Integer getStuckNotified() { return stuckNotified; }
+    public void setStuckNotified(Integer stuckNotified) { this.stuckNotified = stuckNotified; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getCompletedAt() { return completedAt; }

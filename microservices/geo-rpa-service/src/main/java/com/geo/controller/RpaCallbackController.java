@@ -2,6 +2,7 @@ package com.geo.controller;
 
 import com.geo.common.Result;
 import com.geo.service.MinioService;
+import com.geo.service.RpaWorkerDispatcherService;
 import com.geo.entity.TaskResult;
 import com.geo.enums.AiPlatform;
 import com.geo.enums.ResultStatus;
@@ -30,14 +31,32 @@ public class RpaCallbackController {
     private final RestTemplate restTemplate;
     private final MinioService minioService;
     private final TaskResultMapper taskResultMapper;
+    private final RpaWorkerDispatcherService dispatcher;
     private final ObjectMapper objectMapper;
 
     public RpaCallbackController(RestTemplate restTemplate, MinioService minioService,
-                                  TaskResultMapper taskResultMapper, ObjectMapper objectMapper) {
+                                  TaskResultMapper taskResultMapper,
+                                  RpaWorkerDispatcherService dispatcher,
+                                  ObjectMapper objectMapper) {
         this.restTemplate = restTemplate;
         this.minioService = minioService;
         this.taskResultMapper = taskResultMapper;
+        this.dispatcher = dispatcher;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * 任务池看板：返回全局任务池的实时分布数据，供前端监控。
+     * 网关 /api/rpa/pool 会转发到这里。
+     */
+    @GetMapping("/pool")
+    public Result<Map<String, Object>> taskPoolOverview() {
+        Map<String, Object> data = new HashMap<>();
+        data.put("statusCount", taskResultMapper.countByStatus());
+        data.put("platformCount", taskResultMapper.countByPlatform());
+        data.put("workerCount", taskResultMapper.countByAssignee());
+        data.put("runningUnits", taskResultMapper.selectRunningUnits());
+        return Result.success("ok", data);
     }
 
     @PostMapping("/upload")
@@ -177,6 +196,24 @@ public class RpaCallbackController {
             return Result.fail(400, "无法精确匹配到任务记录，请确保RPA回调时传回 aiPlatform 参数");
         }
 
+        boolean terminal = ResultStatus.SUCCESS.name().equalsIgnoreCase(status)
+                || ResultStatus.FAILED.name().equalsIgnoreCase(status)
+                || ResultStatus.TIMEOUT.name().equalsIgnoreCase(status);
+
+        if (terminal) {
+            String taskStatus = null;
+            try {
+                taskStatus = taskResultMapper.selectTaskStatusByNo(taskNo);
+            } catch (Exception e) {
+                log.warn("查询任务状态失败: taskNo={}", taskNo, e);
+            }
+            if ("CANCELLED".equals(taskStatus) && ResultStatus.SUCCESS.name().equalsIgnoreCase(status)) {
+                log.info("任务已取消，忽略逾期成功回调: taskNo={}, unitId={}", taskNo, targetResult.getId());
+                status = ResultStatus.FAILED.name();
+                errorMsg = "任务已终止，忽略逾期回调结果";
+            }
+        }
+
         targetResult.setStatus(status);
         targetResult.setErrorMsg(errorMsg);
         targetResult.setDurationMs(durationMs);
@@ -214,6 +251,10 @@ public class RpaCallbackController {
             );
         } catch (Exception e) {
             log.error("调用 task-service 更新任务进度失败: taskId={}", targetResult.getTaskId(), e);
+        }
+
+        if (terminal) {
+            dispatcher.finish(targetResult.getId());
         }
 
         log.info("任务结果更新成功: id={}, questionText={}, status={}, screenshotUrls={}",

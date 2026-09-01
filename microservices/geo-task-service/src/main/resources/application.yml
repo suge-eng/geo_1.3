@@ -30,7 +30,7 @@ spring:
     redis:
       host: localhost
       port: 6380
-      password: redis123
+      password: "123456"
       timeout: 10s
 
   servlet:
