@@ -17,6 +17,9 @@ import java.util.Map;
  *
  * 各平台 worker 通过 HTTP 认领一个单元 -> 执行 -> 回调 -> 再认领，替代原先依赖
  * RabbitMQ 单队列 + SQLite 全局锁的串行消费方式，从而实现多用户公平调度与多机并行。
+ *
+ * 路径以 /internal 开头，表示「内部接口」：只供 worker 脚本与本系统内部服务调用，
+ * 走网关时不做登录态鉴权（区别于面向用户的前台接口），因此入参除业务字段外无额外身份信息。
  */
 @RestController
 @RequestMapping("/internal/rpa/worker")
@@ -24,6 +27,7 @@ public class InternalWorkerController {
 
     private static final Logger log = LoggerFactory.getLogger(InternalWorkerController.class);
 
+    /** 认领/心跳/中止的并发正确性全部委托给 Dispatcher，本类只做 HTTP 参数解析与结果封装。 */
     private final RpaWorkerDispatcherService dispatcher;
 
     public InternalWorkerController(RpaWorkerDispatcherService dispatcher) {

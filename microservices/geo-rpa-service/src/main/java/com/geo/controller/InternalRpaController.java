@@ -13,6 +13,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 内部 RPA 操作入口，供本系统其它微服务（如 task-service）以内部方式触发 RPA 侧动作。
+ *
+ * 与 {@link InternalWorkerController} 的差异：
+ *   - InternalWorkerController 面向跑在用户电脑上的 worker 脚本（认领/心跳/中止）；
+ *   - 本控制器面向服务端内部调用，例如任务生成单元后通知 rpa-service「可以开始调度」。
+ * 同样以 /internal 开头，走网关时不要求登录态。
+ */
 @RestController
 @RequestMapping("/internal/rpa")
 public class InternalRpaController {
@@ -27,6 +35,10 @@ public class InternalRpaController {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 内部调度入口：接收任务拆分后的执行单元列表，交给 RpaDispatchService 走任务池流程。
+     * 在任务池模式下派发工作已由「worker 主动认领」取代，此处主要是接收并记录、触发后续推进信号。
+     */
     @PostMapping("/dispatch")
     public Result<String> dispatchTasks(@RequestBody Map<String, Object> body) {
         try {

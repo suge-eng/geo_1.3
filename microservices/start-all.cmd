@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM ===============================
 REM Start all 5 microservices (4 middleware containers running first)
 REM Ports:
@@ -10,7 +11,15 @@ REM   8080 geo-gateway  (ENTRY POINT: http://localhost:8080)
 REM ===============================
 setlocal
 
+REM ---------------------------------------------------------------------
+REM Overall flow (middleware containers are started separately by docker-compose):
+REM   1) Auto-detect JDK 17 path;
+REM   2) Call build-jars.cmd to package 5 executable jars;
+REM   3) Launch 5 microservices one by one, each in a MINIMIZED window.
+REM ---------------------------------------------------------------------
+
 REM ------ JAVA_HOME auto-detect ------
+REM Detection order: env var -> registry (various JDK vendors) -> common install dirs -> where java
 if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" goto :jdk_ok
 for /f "tokens=2*" %%A in ('reg query "HKLM\SOFTWARE\Eclipse Adoptium\JDK" /s 2^>nul ^| findstr /I /C:"Path" /C:"JavaHome"') do if not "%%~B"=="" if exist "%%~B\bin\java.exe" (set "JAVA_HOME=%%~B" & goto :jdk_ok)
 for /f "tokens=2*" %%A in ('reg query "HKLM\SOFTWARE\JavaSoft\JDK" /s 2^>nul ^| findstr /I /C:"JavaHome"') do if not "%%~B"=="" if exist "%%~B\bin\java.exe" (set "JAVA_HOME=%%~B" & goto :jdk_ok)
@@ -23,21 +32,26 @@ pause
 exit /b 1
 
 :jdk_ok
+REM Prepend the detected JDK's bin dir to PATH so we use the intended java.exe
 set "PATH=%JAVA_HOME%\bin;%PATH%"
 echo [INFO] Using JAVA_HOME=%JAVA_HOME%
 
+REM BD = directory of this script (microservices folder). All paths are relative to it.
 set "BD=%~dp0"
 cd /d "%BD%"
 
 echo.
 echo === Build jars first ===
+REM Call the packaging script. Abort if build fails.
 call build-jars.cmd
 if errorlevel 1 (echo Build FAILED & pause & exit /b 1)
 
 echo.
 echo === Start 5 microservices (each in a MINIMIZED console window titled geo-*) ===
-REM NOTE: We pushd into each service's target folder so the -jar argument is JUST the
-REM simple filename with NO embedded spaces / Chinese chars - zero ambiguity.
+REM Pattern for each service:
+REM   pushd into service's target dir -> start jar in a MINIMIZED window using
+REM   plain filename (avoids issues with Chinese/spaces in path) -> popd back ->
+REM   wait 3 sec before launching next one to avoid resource contention.
 
 echo [1/5] geo-task-service     port 8081  heap 1024m
 pushd "%BD%geo-task-service\target"

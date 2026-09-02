@@ -1,47 +1,53 @@
+# ===== 服务容器（内嵌 Tomcat）配置 =====
 server:
-  address: 0.0.0.0
-  port: 8084
-  connection-timeout: 600s
-  forward-headers-strategy: framework
+  address: 0.0.0.0            # 监听所有网卡
+  port: 8084                  # 本服务端口（RPA 服务固定 8084）
+  connection-timeout: 600s    # 连接建立超时：10 分钟
+  forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头
   compression:
-    enabled: true
-    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml
-    min-response-size: 1024
+    enabled: true             # 开启 HTTP 响应压缩
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml  # 只对列出的类型压缩
+    min-response-size: 1024   # 响应体大于 1KB 才压缩
   tomcat:
-    keep-alive-timeout: 600s
-    max-keep-alive-requests: -1
-    max-threads: 200
-    accept-count: 1000
+    keep-alive-timeout: 600s  # 单连接空闲保持时间
+    max-keep-alive-requests: -1  # 连接复用次数，-1 不限
+    max-threads: 200          # 工作线程上限
+    accept-count: 1000        # 满载等待队列长度
+    # 若部署在代理之后，用下面的头信息还原真实客户端 IP 与协议
     remoteip:
       remote-ip-header: X-Forwarded-For
       protocol-header: X-Forwarded-Proto
       host-header: X-Forwarded-Host
       port-header: X-Forwarded-Port
 
+# ===== Spring 应用基础配置 =====
 spring:
   application:
-    name: geo-rpa-service
+    name: geo-rpa-service   # 服务名
   mvc:
     async:
-      request-timeout: 600000
+      request-timeout: 600000  # 异步请求超时（毫秒）
 
+  # ----- MySQL 数据源 -----
   datasource:
     url: jdbc:mysql://localhost:3307/geo_backend?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    username: geo
-    password: geo123
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: geo             # 数据库账号
+    password: geo123          # 数据库密码
+    driver-class-name: com.mysql.cj.jdbc.Driver  # MySQL 8 驱动
 
+  # ----- Redis 连接 -----
   data:
     redis:
-      host: localhost
-      port: 6380
-      password: "123456"
-      timeout: 10s
+      host: localhost         # Redis 地址
+      port: 6380              # Redis 端口
+      password: "123456"      # Redis 密码
+      timeout: 10s            # 命令超时
 
+  # ----- 文件上传大小限制 -----
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 100MB
+      max-file-size: 50MB     # 单个上传文件上限
+      max-request-size: 100MB # 单次请求总上传上限
 
   # ===== 邮件 SMTP 配置（卡住通知用）=====
   # 请把下面的 host/port/username/password 改成你自己邮箱的 SMTP 信息。
@@ -63,33 +69,37 @@ spring:
           starttls:
             enable: true
 
+# ===== MyBatis-Plus 配置 =====
 mybatis-plus:
   configuration:
-    map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    map-underscore-to-camel-case: true   # 下划线字段映射驼峰
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # 控制台打印 SQL
   global-config:
     db-config:
-      id-type: auto
-      table-underline: true
-  mapper-locations: classpath*:mapper/**/*.xml
+      id-type: auto         # 主键自增
+      table-underline: true # 表名字段名下划线转换
+  mapper-locations: classpath*:mapper/**/*.xml  # Mapper XML 扫描路径
 
+# ===== MinIO 对象存储连接配置 =====
 minio:
-  endpoint: http://localhost:9002
-  access-key: minioadmin
-  secret-key: minioadmin123
-  bucket: geo-bucket
-  public-endpoint: http://172.27.64.1:9002
+  endpoint: http://localhost:9002        # MinIO 服务地址（服务端内部访问用）
+  access-key: minioadmin                 # 访问密钥（账号）
+  secret-key: minioadmin123              # 访问密钥（密码）
+  bucket: geo-bucket                     # 文件存放的桶名
+  public-endpoint: http://172.27.64.1:9002  # 对外暴露的下载地址
 
+# ===== 日志 =====
 logging:
   level:
     com.geo: DEBUG
 
+# ===== 业务自定义配置（geo.*，由本项目代码读取）=====
 geo:
   rpa:
-    max-retry-count: 10
-    request-timeout-ms: 120000
+    max-retry-count: 10                  # worker 回调失败后的最大重试次数
+    request-timeout-ms: 120000           # 调用外部接口的超时时间（毫秒）= 2 分钟
     rate-limit:
-      max-requests-per-minute: 60
+      max-requests-per-minute: 60        # 每分钟允许的最大请求数（限流保护）
     worker:
       # 单元认领后的租约时长（秒），worker 心跳续约
       lease-seconds: 1200

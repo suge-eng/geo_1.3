@@ -10,33 +10,43 @@
         <version>1.0.0</version>
     </parent>
 
+    <!--
+      公共模块（geo-common）—— 所有微服务共同依赖的“地基”，本身不单独启动。
+      包含：实体类(entity)、枚举(enums)、DTO、通用工具(common)、Mapper 接口。
+      抽成独立模块是为了让各服务共享同一套数据结构，避免代码重复复写。
+    -->
     <artifactId>geo-common</artifactId>
     <name>geo-common</name>
     <description>GEO Common Module (entity, enums, dto, common, mapper)</description>
 
     <dependencies>
+        <!-- Web 能力；scope=provided 表示只在编译期使用，运行时由真正启动的服务提供 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
             <scope>provided</scope>
         </dependency>
 
+        <!-- 参数校验注解支持（@Valid、@NotNull 等） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!-- MyBatis-Plus；optional=true 表示本模块只是“可能用到”，由引用方决定是否引入 -->
         <dependency>
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
             <optional>true</optional>
         </dependency>
 
+        <!-- Jackson 注解：控制对象与 JSON 互转时的字段名/忽略规则 -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
         </dependency>
 
+        <!-- Jackson 对 Java8 日期时间(LocalDate/LocalDateTime)的序列化支持 -->
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>

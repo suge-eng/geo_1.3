@@ -1,62 +1,71 @@
+# ===== 服务容器（内嵌 Tomcat）配置 =====
 server:
-  address: 0.0.0.0
-  port: 8082
-  connection-timeout: 600s
-  forward-headers-strategy: framework
+  address: 0.0.0.0            # 监听所有网卡
+  port: 8082                  # 本服务端口（分析服务固定 8082）
+  connection-timeout: 600s    # 连接建立超时：10 分钟
+  forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头
   tomcat:
-    keep-alive-timeout: 600s
-    max-keep-alive-requests: -1
-    max-threads: 200
-    accept-count: 1000
+    keep-alive-timeout: 600s  # 单连接空闲保持时间
+    max-keep-alive-requests: -1  # 连接复用次数，-1 不限
+    max-threads: 200          # 工作线程上限
+    accept-count: 1000        # 满载等待队列长度
 
+# ===== Spring 应用基础配置 =====
 spring:
   application:
-    name: geo-analysis-service
+    name: geo-analysis-service   # 服务名
   mvc:
     async:
-      request-timeout: 600000
+      request-timeout: 600000    # 异步请求超时（毫秒）= 10 分钟
 
+  # ----- MySQL 数据源 -----
   datasource:
     url: jdbc:mysql://localhost:3307/geo_backend?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    username: geo
-    password: geo123
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: geo               # 数据库账号
+    password: geo123            # 数据库密码
+    driver-class-name: com.mysql.cj.jdbc.Driver  # MySQL 8 驱动
 
+  # ----- Redis 连接 -----
   data:
     redis:
-      host: localhost
-      port: 6380
-      password: "123456"
-      timeout: 10s
+      host: localhost           # Redis 地址
+      port: 6380                # Redis 端口
+      password: "123456"        # Redis 密码
+      timeout: 10s              # 命令超时
 
+  # ----- 文件上传大小限制 -----
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 100MB
+      max-file-size: 50MB     # 单个上传文件上限
+      max-request-size: 100MB # 单次请求总上传上限
 
+# ===== MyBatis-Plus 配置 =====
 mybatis-plus:
   configuration:
-    map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    map-underscore-to-camel-case: true   # 下划线字段映射驼峰
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # 控制台打印 SQL
   global-config:
     db-config:
-      id-type: auto
-      table-underline: true
-  mapper-locations: classpath*:mapper/**/*.xml
+      id-type: auto         # 主键自增
+      table-underline: true # 表名字段名下划线转换
+  mapper-locations: classpath*:mapper/**/*.xml  # Mapper XML 扫描路径
 
+# ===== 日志 =====
 logging:
   level:
     com.geo: DEBUG
 
+# ===== 业务自定义配置 =====
 geo:
   ai:
+    # 调用大模型生成报告所需的密钥与接口地址（阿里云百炼 DashScope 的 OpenAI 兼容接口）
     api-key: sk-34fbbe6fb8c94c41adb9990396b6c636
     api-endpoint: https://dashscope.aliyuncs.com/compatible-mode/v1
-    model: qwen3.7-plus-2026-05-26
-    timeout-seconds: 300
-    enabled: true
-    batch-size: 15
-    max-concurrency: 8
-    failover-to-text-match: true
+    model: qwen3.7-plus-2026-05-26      # 使用的模型名称
+    timeout-seconds: 300                # 单次 AI 请求超时（秒）
+    enabled: true                       # AI 能力总开关
+    batch-size: 15                      # 批量处理大小
+    max-concurrency: 8                  # AI 并发调用上限
+    failover-to-text-match: true        # AI 失败时是否降级为“文本匹配”兜底
   report:
-    async-threshold: 100
+    async-threshold: 100                # 结果数量超过该阈值时改用异步方式生成报告

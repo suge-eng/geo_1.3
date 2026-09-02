@@ -2,6 +2,7 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.geo.mapper.TaskAiMapper">
 
+    <!-- 按任务号查询该任务关联的 AI 平台列表，id 升序 -->
     <select id="selectByTaskNo" resultType="com.geo.entity.TaskAi">
         SELECT * FROM task_ai WHERE task_no = #{taskNo} ORDER BY id
     </select>

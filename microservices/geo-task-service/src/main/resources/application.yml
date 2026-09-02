@@ -1,61 +1,71 @@
+# ===== 服务容器（内嵌 Tomcat）配置 =====
 server:
-  address: 0.0.0.0
-  port: 8081
-  connection-timeout: 600s
-  forward-headers-strategy: framework
+  address: 0.0.0.0            # 监听所有网卡，允许外部访问
+  port: 8081                  # 本服务端口（任务服务固定 8081）
+  connection-timeout: 600s    # 连接建立超时：10 分钟
+  forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头，以获取真实客户端 IP
   compression:
-    enabled: true
-    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml
-    min-response-size: 1024
+    enabled: true             # 开启 HTTP 响应压缩，节省带宽
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml  # 只对列出的类型压缩
+    min-response-size: 1024   # 响应体大于 1KB 才压缩（太小压缩无收益）
   tomcat:
-    keep-alive-timeout: 600s
-    max-keep-alive-requests: -1
-    max-threads: 200
-    accept-count: 1000
+    keep-alive-timeout: 600s  # 单个 TCP 连接空闲保持时间
+    max-keep-alive-requests: -1  # 单连接可复用请求次数，-1 表示不限
+    max-threads: 200          # Tomcat 工作线程池上限
+    accept-count: 1000        # 线程满载时的等待队列长度
 
+# ===== Spring 应用基础配置 =====
 spring:
   application:
-    name: geo-task-service
+    name: geo-task-service   # 服务名（微服务注册、日志标识用）
   mvc:
     async:
-      request-timeout: 600000
+      request-timeout: 600000  # 异步请求超时（毫秒）= 10 分钟，适配长时间统计任务
 
+  # ----- 数据库（MySQL）连接 -----
   datasource:
+    # JDBC 连接串：localhost:3307 的 geo_backend 库，附带字符集/时区/SSL 等参数
     url: jdbc:mysql://localhost:3307/geo_backend?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    username: geo
-    password: geo123
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: geo             # 数据库账号
+    password: geo123          # 数据库密码
+    driver-class-name: com.mysql.cj.jdbc.Driver  # MySQL 8 官方驱动
 
+  # ----- Redis 连接 -----
   data:
     redis:
-      host: localhost
-      port: 6380
-      password: "123456"
-      timeout: 10s
+      host: localhost         # Redis 地址
+      port: 6380              # Redis 端口（本系统统一用 6380，避开默认 6379）
+      password: "123456"      # Redis 密码（用引号包住，避免被误判为数字）
+      timeout: 10s            # Redis 命令超时时间
 
+  # ----- 文件上传大小限制 -----
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 100MB
+      max-file-size: 50MB     # 单个上传文件上限
+      max-request-size: 100MB # 单次请求总上传上限
 
+# ===== MyBatis-Plus（数据库 ORM 框架）配置 =====
 mybatis-plus:
   configuration:
-    map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    map-underscore-to-camel-case: true   # 数据库下划线字段(user_id)自动映射为 Java 驼峰(userId)
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # SQL 日志打印到控制台，便于排查
   global-config:
     db-config:
-      id-type: auto
-      table-underline: true
-  mapper-locations: classpath*:mapper/**/*.xml
+      id-type: auto         # 主键策略：数据库自增
+      table-underline: true # 表名/字段名按需转换为下划线风格
+  mapper-locations: classpath*:mapper/**/*.xml  # Mapper XML 文件扫描路径
 
+# ===== 业务自定义配置（geo.*，由本项目代码读取）=====
 geo:
   rpa:
+    # 指向 RPA 服务的派发接口：任务服务把要抓取的单元交给 RPA 服务调度
     url: http://localhost:8084/internal/rpa/dispatch
   task:
     timeout:
-      check-interval-seconds: 30
-      timeout-minutes: 720
+      check-interval-seconds: 30   # 任务超时检查的轮询间隔（秒）
+      timeout-minutes: 720         # 任务整体超时阈值（分钟）= 12 小时
 
+# ===== 日志级别 =====
 logging:
   level:
-    com.geo: DEBUG
+    com.geo: DEBUG   # 本项目代码统一输出 DEBUG 级日志

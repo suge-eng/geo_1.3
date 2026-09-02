@@ -2,6 +2,7 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.geo.mapper.TaskQuestionMapper">
 
+    <!-- 按任务号查询问题列表，sort_order 升序：保持题目的原始顺序 -->
     <select id="selectByTaskNo" resultType="com.geo.entity.TaskQuestion">
         SELECT * FROM task_question WHERE task_no = #{taskNo} ORDER BY sort_order
     </select>

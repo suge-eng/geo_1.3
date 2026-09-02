@@ -1,11 +1,14 @@
+# ===== 服务容器配置 =====
 server:
-  port: 8083
-  address: 0.0.0.0
-  forward-headers-strategy: framework
+  port: 8083                  # 本服务端口（文件服务固定 8083）
+  address: 0.0.0.0            # 监听所有网卡
+  forward-headers-strategy: framework  # 信任代理传来的 X-Forwarded-* 头
 
+# ===== Spring 应用基础配置 =====
 spring:
   application:
-    name: geo-file-service
+    name: geo-file-service   # 服务名
+  # 本服务只做文件代理、不操作数据库，因此排除数据库相关自动配置，避免启动失败
   autoconfigure:
     exclude:
       - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
@@ -14,16 +17,18 @@ spring:
       - com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 100MB
+      max-file-size: 50MB     # 单文件上传上限
+      max-request-size: 100MB # 单次请求上传上限
 
+# ===== MinIO 对象存储连接配置 =====
 minio:
-  endpoint: http://localhost:9002
-  access-key: minioadmin
-  secret-key: minioadmin123
-  bucket: geo-bucket
-  public-endpoint: http://172.27.64.1:9002
+  endpoint: http://localhost:9002        # MinIO 服务地址（服务端内部访问用）
+  access-key: minioadmin                 # 访问密钥（账号）
+  secret-key: minioadmin123              # 访问密钥（密码）
+  bucket: geo-bucket                     # 文件存放的桶名
+  public-endpoint: http://172.27.64.1:9002  # 对外暴露的下载地址（前端/外部直接访问用）
 
+# ===== 日志 =====
 logging:
   level:
     com.geo: DEBUG

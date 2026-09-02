@@ -13,6 +13,16 @@ import org.springframework.context.annotation.Primary;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
+/**
+ * 【JSON序列化配置 - 全局ObjectMapper】
+ * 设计思路：
+ * 1. 统一全服务的JSON（反）序列化行为，确保各模块数据格式一致
+ * 2. 核心设置：
+ *    - 日期格式统一为"yyyy-MM-dd HH:mm:ss"字符串（而非时间戳数组），前端易读
+ *    - FAIL_ON_UNKNOWN_PROPERTIES=false：前后端解耦，前端传多余字段不报错
+ * 3. @Primary：当Spring容器中有多个ObjectMapper时，优先使用这个
+ *    （geo-common等模块可能也会注册ObjectMapper，用Primary避免冲突）
+ */
 @Configuration
 public class JacksonConfig {
 

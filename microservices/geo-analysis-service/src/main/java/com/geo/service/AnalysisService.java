@@ -35,13 +35,43 @@ import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
+/**
+ * 【分析报告核心服务】
+ * 设计思路 —— 本类是 geo-analysis-service 的大脑，负责"把一批 task_result 汇总成一份分析报告"：
+ *
+ * 1. 主链路（doGenerateReport）：
+ *    读任务 → 读该任务成功的结果 → (可选) AI 批量做品牌排名 + 情感分析 →
+ *    文本规则统计品牌提及/首发/前3/前5 等指标 → 组装各报告模块（指标组、图表、排名、
+ *    对比表、口碑、关键词云、AI 总结）→ 加权算出综合评分 → 缓存报告 + 落历史快照表。
+ *
+ * 2. 同步/异步双模式：
+ *    - 数据量小：同步生成，接口直接返回报告；
+ *    - 结果数超过阈值（geo.report.async-threshold，默认 100）或前端显式 async=true：
+ *      走 @Async 后台线程池生成，前端轮询或 WebSocket 获取进度。
+ *    进度/状态保存在内存 ConcurrentHashMap（reportGenStatusMap）里，单机部署足够；
+ *    多实例部署时需替换为 Redis 等共享存储。
+ *
+ * 3. AI 增强（可开关）：
+ *    - geo.ai.enabled=true 且配置了 api-key 时，调用 LLM（默认 DeepSeek）批量提取品牌
+ *      排名顺序与情感倾向；AI 失败会自动"降级"为纯文本规则匹配，保证报告一定能产出。
+ *
+ * 4. 报告缓存与版本化：
+ *    - 报告 JSON 同时写回 task.report_json（最新一份）与 task_report 表（历史快照），
+ *      既支持秒查最新报告，也支持按版本回溯历史报告。
+ */
 @Service
 public class AnalysisService {
 
     private static final Logger log = LoggerFactory.getLogger(AnalysisService.class);
 
+    /** 报告生成状态机：IDLE=空闲 RUNNING=生成中 COMPLETED=完成 FAILED=失败 */
     public enum ReportGenStatus { IDLE, RUNNING, COMPLETED, FAILED }
 
+    /**
+     * 【单任务报告生成状态（内存对象）】
+     * 承载异步生成过程中的进度、阶段、错误信息与最终结果；
+     * 字段全部用 volatile 修饰，保证多线程写入后其他线程能立刻读到最新值。
+     */
     public static class ReportGenerationStatus {
         private volatile ReportGenStatus status = ReportGenStatus.IDLE;
         private volatile int progressPercent;
@@ -67,6 +97,7 @@ public class AnalysisService {
         public void setReport(AnalysisReportResponse report) { this.report = report; }
     }
 
+    /** 所有任务的报告生成状态（内存态），key=taskNo；多实例部署时建议下沉到 Redis 共享 */
     private final ConcurrentHashMap<String, ReportGenerationStatus> reportGenStatusMap = new ConcurrentHashMap<>();
 
     private final TaskMapper taskMapper;
@@ -76,6 +107,7 @@ public class AnalysisService {
     private final Executor taskExecutor;
     private final RedisTemplate<String, String> redisTemplate;
 
+    // ---- 以下为 AI 增强相关配置（geo.ai.*）：enabled=false 或未配置 key 时自动走文本规则兜底 ----
     @Value("${geo.ai.api-key:}")
     private String aiApiKey;
 
@@ -100,6 +132,7 @@ public class AnalysisService {
     @Value("${geo.ai.failover-to-text-match:true}")
     private boolean aiFailoverToTextMatch;
 
+    /** 成功结果条数超过该阈值时自动切换为异步生成（避免同步接口超时），默认 100 */
     @Value("${geo.report.async-threshold:100}")
     private int reportAsyncThreshold;
 
@@ -120,14 +153,20 @@ public class AnalysisService {
         this.redisTemplate = redisTemplate;
     }
 
+    /** 同步生成（默认优先用缓存，不做强制重算） */
     public AnalysisReportResponse generateReport(String taskNo) {
         return generateReport(taskNo, false);
     }
 
+    /**
+     * 同步生成报告的统一入口：forceRegenerate=true 时跳过缓存强制重算，
+     * 具体处理链路见 doGenerateReport。
+     */
     public AnalysisReportResponse generateReport(String taskNo, boolean forceRegenerate) {
         return doGenerateReport(taskNo, forceRegenerate, null);
     }
 
+    /** 判断任务是否已有缓存的报告 JSON（task.report_json 非空） */
     public boolean hasCachedReport(String taskNo) {
         try {
             Task task = taskMapper.selectOne(
@@ -139,6 +178,7 @@ public class AnalysisService {
         }
     }
 
+    /** 成功结果条数 > reportAsyncThreshold 时建议走异步，避免同步接口长时间阻塞 */
     public boolean shouldUseAsync(String taskNo) {
         try {
             List<TaskResult> results = taskResultMapper.selectByTaskNo(taskNo);
@@ -150,6 +190,7 @@ public class AnalysisService {
         }
     }
 
+    /** 查询某任务的生成状态；从未生成过时返回一个 IDLE 状态对象，便于前端统一处理 */
     public ReportGenerationStatus getReportGenerationStatus(String taskNo) {
         ReportGenerationStatus s = reportGenStatusMap.get(taskNo);
         if (s == null) {
@@ -159,6 +200,11 @@ public class AnalysisService {
         return s;
     }
 
+    /**
+     * 异步生成报告：由 @Async 投递到 taskExecutor 线程池执行，主线程立即返回。
+     * 先用 synchronized(status) 原子地抢占 RUNNING 状态防重复提交，再通过 progressCallback
+     * 分批更新进度并推送到 Redis（供 WebSocket 转发给前端）；结束后把完整报告挂到状态对象上。
+     */
     @Async("taskExecutor")
     public void generateReportAsync(String taskNo, boolean forceRegenerate) {
         ReportGenerationStatus status = reportGenStatusMap.computeIfAbsent(taskNo, k -> new ReportGenerationStatus());
@@ -299,6 +345,11 @@ public class AnalysisService {
         return "报告生成失败（" + typeName + "），请查看日志";
     }
 
+    /**
+     * 报告生成的真正主链路（同步/异步共用）：
+     * 读任务 → 校验结果数据 → 可选 AI 批量分析 → 统计品牌指标 → 组装各报告模块 →
+     * 加权计算综合评分 → 序列化缓存 + 存历史快照。progressCallback 非空时按阶段回调进度。
+     */
     private AnalysisReportResponse doGenerateReport(String taskNo, boolean forceRegenerate, Consumer<Integer> progressCallback) {
         log.info("生成分析报告: taskNo={}, forceRegenerate={}", taskNo, forceRegenerate);
 
@@ -495,6 +546,7 @@ public class AnalysisService {
         return report;
     }
 
+    /** 列出某任务的所有历史报告快照摘要（只挑关键字段，避免整份大 JSON 全量下发） */
     public List<Map<String, Object>> listReportHistory(String taskNo) {
         List<TaskReport> reports = taskReportMapper.selectByTaskNo(taskNo);
         List<Map<String, Object>> result = new ArrayList<>();
@@ -526,6 +578,7 @@ public class AnalysisService {
         return result;
     }
 
+    /** 按快照 id 取指定历史报告的完整内容 */
     public AnalysisReportResponse getReportById(Long reportId) {
         TaskReport taskReport = taskReportMapper.selectById(reportId);
         if (taskReport == null) {
@@ -541,6 +594,7 @@ public class AnalysisService {
         }
     }
 
+    /** 解析竞对品牌：优先按 JSON 数组解析，失败则降级按逗号/顿号/分号/空格切分 */
     private List<String> parseCompetitors(String competitorsStr) {
         List<String> result = new ArrayList<>();
         if (competitorsStr == null || competitorsStr.isEmpty()) {
@@ -674,6 +728,11 @@ public class AnalysisService {
                 perPlatformWhitelistMatchRate);
     }
 
+    /**
+     * 【单个品牌的指标统计容器（内存中间结果）】
+     * 汇总某品牌在所有有效结果里的：提及次数、首位出现次数、进前3/前5次数、
+     * 自然推荐次数等，并提供占比率/得分等派生计算，供报告各模块复用。
+     */
     public static class BrandMetrics {
         private String brandName;
         private int mentionCount;
@@ -727,6 +786,7 @@ public class AnalysisService {
         }
     }
 
+    /** 核心统计：遍历有效结果，结合 AI 排名结果，统计每个品牌（含自品牌与竞品）的各项指标 */
     private Map<String, BrandMetrics> analyzeBrandData(List<TaskResult> validResults,
                                                        String selfBrand,
                                                        List<String> competitorBrands,
@@ -1863,6 +1923,12 @@ public class AnalysisService {
         return batchAnalyzeBrandRankings(validResults, selfBrand, competitorBrands, progressCallback, null);
     }
 
+    /**
+     * AI 批量提取品牌排名与情感（核心实现）：
+     * 把有效结果按 aiBatchSize 切批，用固定线程池 + Semaphore 控制并发（aiMaxConcurrency），
+     * 逐批调用 LLM；单批失败且开启 failover 时跳过（由文本匹配兜底），否则逐条重试。
+     * 结果写入 rankingMap（结果id → 品牌排名列表）与 sentimentMap（结果id → 情感）。
+     */
     private Map<Long, List<String>> batchAnalyzeBrandRankings(List<TaskResult> validResults,
                                                               String selfBrand,
                                                               List<String> competitorBrands,
@@ -2595,6 +2661,7 @@ public class AnalysisService {
         return count;
     }
 
+    /** 生成全局/趋势报告：聚合该任务所有历史报告快照，产出跨时间维度的趋势数据（保留扩展入口） */
     public AnalysisReportResponse generateGlobalReport(String taskNo) {
         log.info("生成全局数据报告: taskNo={}", taskNo);
 

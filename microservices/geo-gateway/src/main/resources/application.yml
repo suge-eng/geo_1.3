@@ -1,26 +1,30 @@
+# ===== 服务容器（内嵌 Tomcat）配置 =====
 server:
-  address: 0.0.0.0
-  port: 8080
-  connection-timeout: 600s
-  forward-headers-strategy: framework
+  address: 0.0.0.0            # 监听所有网卡
+  port: 8080                  # 本服务端口（网关是对外唯一入口，固定 8080）
+  connection-timeout: 600s    # 连接建立超时：10 分钟
+  forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头
   compression:
-    enabled: true
-    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml
-    min-response-size: 1024
+    enabled: true             # 开启 HTTP 响应压缩
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,image/svg+xml  # 只对列出的类型压缩
+    min-response-size: 1024   # 响应体大于 1KB 才压缩
   tomcat:
-    keep-alive-timeout: 600s
-    max-keep-alive-requests: -1
-    max-threads: 200
-    accept-count: 1000
+    keep-alive-timeout: 600s  # 单连接空闲保持时间
+    max-keep-alive-requests: -1  # 连接复用次数，-1 不限
+    max-threads: 200          # 工作线程上限
+    accept-count: 1000        # 满载等待队列长度
+    # 若部署在 Nginx 等代理之后，用下面的头信息还原真实客户端 IP 与协议
     remoteip:
       remote-ip-header: X-Forwarded-For
       protocol-header: X-Forwarded-Proto
       host-header: X-Forwarded-Host
       port-header: X-Forwarded-Port
 
+# ===== Spring 应用基础配置 =====
 spring:
   application:
-    name: geo-gateway
+    name: geo-gateway    # 服务名
+  # 网关本身不做数据库存取，排除数据库相关自动配置，避免启动失败
   autoconfigure:
     exclude:
       - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
@@ -29,31 +33,35 @@ spring:
       - com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration
   mvc:
     async:
-      request-timeout: 600000
-    static-path-pattern: /**
-    throw-exception-if-no-handler-found: true
+      request-timeout: 600000    # 异步请求超时（毫秒）
+    static-path-pattern: /**     # 静态资源匹配所有路径（前端单页应用）
+    throw-exception-if-no-handler-found: true  # 未匹配到处理器时抛异常，便于统一返回 404
 
+  # ----- Redis 连接 -----
   data:
     redis:
-      host: localhost
-      port: 6380
-      password: "123456"
-      database: 0
-      timeout: 10s
+      host: localhost           # Redis 地址
+      port: 6380                # Redis 端口
+      password: "123456"        # Redis 密码
+      database: 0               # 使用 0 号库
+      timeout: 10s              # 命令超时
       lettuce:
         pool:
-          max-active: 8
+          max-active: 8         # 连接池最大活跃连接数
 
+  # ----- 文件上传大小限制 -----
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 100MB
+      max-file-size: 50MB     # 单个上传文件上限
+      max-request-size: 100MB # 单次请求总上传上限
 
+  # ----- 静态资源（前端页面）-----
   web:
     resources:
-      add-mappings: true
-      static-locations: classpath:/static/
+      add-mappings: true        # 启用默认资源映射
+      static-locations: classpath:/static/   # 前端 HTML/JS/CSS 所在目录
 
+# ===== 日志 =====
 logging:
   level:
     com.geo: DEBUG

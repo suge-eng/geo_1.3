@@ -1,15 +1,27 @@
 <!DOCTYPE html>
+<!--
+  页面的整体结构说明（给新同学）：
+  - 这是一个“纯静态”的单页应用（Vue3 语法），不依赖任何构建工具。
+  - 三个 <script> 依次引入前端三件套：
+      vue.global.prod.js : Vue 框架（提供 v-model、v-if、v-for 等指令）
+      axios.min.js       : 用来向后端发 HTTP 请求
+      echarts.min.js     : 用来画数据报告里的各种图表
+  - 页面真正的逻辑在 js/app.js 中；js/config.js 只存后端地址等配置，
+    js/bootstrap.js 负责“按模式”加载这些脚本（DEMO 模式才加载 mock 数据）。
+-->
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI任务调度平台</title>
+    <!-- url 后带 ?v= 是“缓存版本号”：改前端代码时改这个版本号，可强制浏览器重新下载新文件 -->
     <script src="lib/vue.global.prod.js?v=20260827_whitelist_v1"></script>
     <script src="lib/axios.min.js?v=20260827_whitelist_v1"></script>
     <script src="lib/echarts.min.js?v=20260827_whitelist_v1"></script>
     <link rel="stylesheet" href="css/style.css?v=20260827_whitelist_v1">
 </head>
 <body>
+    <!-- #app 是 Vue 挂载的根节点，其下所有模板语法都由 app.js 里的 Vue 实例接管 -->
     <div id="app" class="container">
         <!-- 头部搜索 -->
         <div class="header-bar">
@@ -21,7 +33,8 @@
             </div>
         </div>
 
-        <!-- 标签切换 -->
+        <!-- 标签切换：通过 activeTab 控制显示“提交任务 / 任务列表 / 任务池”哪一个页面，
+             currentView 进一步控制列表页内部的“列表 / 详情”视图（见 app.js 的状态设计） -->
         <div class="tabs page-tabs">
             <div :class="activeTab === 'submit' ? 'tab active' : 'tab'" @click="activeTab = 'submit'; currentView = 'list'">提交任务</div>
             <div :class="activeTab === 'list' ? 'tab active' : 'tab'" @click="activeTab = 'list'; currentView = 'list'; loadTaskList()">任务列表</div>
@@ -85,7 +98,7 @@
         </div>
         <!-- POOL_VIEW_END -->
 
-        <!-- 提交任务表单 -->
+        <!-- 提交任务表单：activeTab === 'submit' 时显示；内部按 submitMode 再分“手动输入 / Excel 上传”两种 -->
         <div v-if="activeTab === 'submit'" class="card create-card">
             <div class="card-header">
                 <h2 class="card-title">新建任务</h2>
@@ -223,7 +236,7 @@
             </button>
         </div>
 
-        <!-- 任务列表 -->
+        <!-- 任务列表：v-for 遍历 taskList 渲染每张任务卡片；卡片下方按钮按任务状态(v-if)显示不同操作 -->
         <section v-if="activeTab === 'list' && currentView === 'list'" class="task-list-view">
             <div class="task-grid">
                 <article 
@@ -324,7 +337,7 @@
             </div>
         </section>
 
-        <!-- 任务详情 -->
+        <!-- 任务详情：显示选中任务的观测结果表格，支持按层级/展现/舆情/平台等条件筛选 -->
         <div v-if="currentView === 'detail'" class="card detail-card detail-state">
             <div class="detail-header">
                 <div class="detail-heading">
@@ -465,7 +478,7 @@
             </div>
         </div>
 
-        <!-- 历史报告列表页面 -->
+        <!-- 历史报告列表页面：currentView === 'reportHistory' 时显示，列出某任务的历史报告 -->
         <div v-if="currentView === 'reportHistory'" class="report-page">
             <div class="report-header">
                 <div>
@@ -531,7 +544,8 @@
             </div>
         </div>
 
-        <!-- 数据报告页面 -->
+        <!-- 数据报告页面：展示各类图表（竞争力得分、曝光率、声量排名、雷达图、词云等），
+     图表 DOM 用 id 占位，绘制逻辑在 app.js 中由 ECharts 完成 -->
         <div v-if="currentView === 'report'" class="report-page report-workspace-page">
             <div class="detail-header report-context-header">
                 <div class="detail-heading">
@@ -810,6 +824,8 @@
             </div>
         </div>
 
+        <!-- ===== 以下是各类弹窗（Modal），用 v-if 控制显隐，点击遮罩层可关闭 ===== -->
+
         <!-- 问答详情弹窗 -->
         <div v-if="qaModal && qaModal.show" class="modal-overlay" @click="qaModal.show = false">
             <div class="modal" @click.stop>
@@ -1017,10 +1033,11 @@
             </div>
         </div>
 
-        <!-- Toast通知 -->
+        <!-- Toast通知：临时弹出的轻提示（成功/失败），由 app.js 里的 toast 状态控制 -->
         <div v-if="toast && toast.show" :class="['toast', toast.type]">{{ toast.message }}</div>
     </div>
 
+    <!-- 最后加载业务脚本：config.js 提供配置，bootstrap.js 据此按需加载 app.js / mock-data.js -->
     <script src="js/config.js?v=20260827_whitelist_v1"></script>
     <script src="js/bootstrap.js?v=20260827_whitelist_v1"></script>
 </body>

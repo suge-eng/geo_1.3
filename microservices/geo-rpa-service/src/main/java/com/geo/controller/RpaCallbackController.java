@@ -22,6 +22,17 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * worker 结果回报侧入口：承接 worker 执行完成后回传的结果，以及执行过程中的截图上传。
+ *
+ * 与 {@link InternalWorkerController} 的分工：
+ *   - InternalWorkerController 提供 worker 的「认领/心跳/中止」三件套；
+ *   - 本控制器负责 worker 的「结果回报」——即回调结果、上传截图，
+ *     二者合起来构成 worker 脚本与本服务之间的完整 HTTP 协议。
+ *
+ * 路径以 /api/rpa 开头，走网关；截图上传与结果回调都可能由 worker 直接发起，
+ * 因此这里不要求登录态，而是靠 taskNo / taskResultId 等业务字段来定位与校验。
+ */
 @RestController
 @RequestMapping("/api/rpa")
 public class RpaCallbackController {
@@ -59,6 +70,10 @@ public class RpaCallbackController {
         return Result.success("ok", data);
     }
 
+    /**
+     * 接收截图上传：worker 在执行过程中把截图（如验证码页、结果页）POST 上来，
+     * 校验为图片后交给 MinioService 落盘，返回外网可访问的 URL 供后续回调引用。
+     */
     @PostMapping("/upload")
     public Result<String> uploadScreenshot(
             @RequestParam("file") MultipartFile file,
@@ -86,6 +101,18 @@ public class RpaCallbackController {
         }
     }
 
+    /**
+     * worker 结果回调：处理一个单元执行完成后的回报，把结果写入对应记录。
+     *
+     * 核心难点是「把回调定位到数据库里的哪条记录」——worker 回传的字段可能不全或不稳，
+     * 因此采用逐级降级的匹配策略（优先级从高到低）：
+     *   1. taskResultId 精确匹配（最可靠）；
+     *   2. aiPlatform + questionText + PENDING 状态匹配（平台用 code）；
+     *   3. aiPlatform + questionText 匹配（不限状态）；
+     *   4. 平台「显示名」+ questionText + PENDING 匹配（兼容 worker 传中文显示名）；
+     *   5. 平台「显示名」+ questionText 匹配（兜底）。
+     * 全部失败则拒绝回调，避免把结果写到错误的记录上。
+     */
     @PostMapping("/callback")
     @Transactional
     public Result<String> handleRpaCallback(@RequestBody Map<String, Object> request) {
@@ -132,6 +159,7 @@ public class RpaCallbackController {
             }
         }
 
+        // 匹配优先级第 1 级：用 taskResultId 直接精确定位，最可靠。
         if (taskResultId != null) {
             for (TaskResult r : results) {
                 if (taskResultId.equals(r.getId())) {
@@ -142,6 +170,7 @@ public class RpaCallbackController {
             }
         }
 
+        // 匹配优先级第 2/3 级：aiPlatform(code) + questionText，先限定 PENDING，再放宽到不限状态。
         if (targetResult == null && aiPlatform != null && !aiPlatform.isEmpty() && questionText != null && !questionText.isEmpty()) {
             for (TaskResult r : results) {
                 if (aiPlatform.equals(r.getAiPlatform()) && questionText.equals(r.getQuestionText())
@@ -162,6 +191,8 @@ public class RpaCallbackController {
             }
         }
 
+        // 匹配优先级第 4/5 级：worker 可能回传中文显示名，这里反向映射后按「显示名 + questionText」匹配，
+        // 先限定 PENDING，再放宽到不限状态，作为前几级的兜底。
         if (targetResult == null && aiPlatform != null && !aiPlatform.isEmpty() && questionText != null && !questionText.isEmpty()) {
             for (TaskResult r : results) {
                 if (questionText.equals(r.getQuestionText())) {
@@ -196,6 +227,7 @@ public class RpaCallbackController {
             return Result.fail(400, "无法精确匹配到任务记录，请确保RPA回调时传回 aiPlatform 参数");
         }
 
+        // SUCCESS/FAILED/TIMEOUT 均为终态，只有终态才需要做收尾处理（清理租约、推进整体进度）。
         boolean terminal = ResultStatus.SUCCESS.name().equalsIgnoreCase(status)
                 || ResultStatus.FAILED.name().equalsIgnoreCase(status)
                 || ResultStatus.TIMEOUT.name().equalsIgnoreCase(status);
@@ -207,6 +239,7 @@ public class RpaCallbackController {
             } catch (Exception e) {
                 log.warn("查询任务状态失败: taskNo={}", taskNo, e);
             }
+            // 用户已取消的任务：即便是成功的回调也算「逾期」，一律降级为失败，避免污染已终止任务的统计。
             if ("CANCELLED".equals(taskStatus) && ResultStatus.SUCCESS.name().equalsIgnoreCase(status)) {
                 log.info("任务已取消，忽略逾期成功回调: taskNo={}, unitId={}", taskNo, targetResult.getId());
                 status = ResultStatus.FAILED.name();
@@ -253,6 +286,7 @@ public class RpaCallbackController {
             log.error("调用 task-service 更新任务进度失败: taskId={}", targetResult.getTaskId(), e);
         }
 
+        // 终态时释放该单元的租约：单元已达终态，不再需要心跳/回收，交给 Dispatcher.finish 清理租约字段。
         if (terminal) {
             dispatcher.finish(targetResult.getId());
         }
@@ -263,6 +297,10 @@ public class RpaCallbackController {
         return Result.success("回调处理成功");
     }
 
+    /**
+     * 从截图 URL 的文件名中解析平台名。约定文件名形如 xx_{platform}_xxx，
+     * 当 worker 未直接回传 aiPlatform 时作为兜底线索。
+     */
     private String extractPlatformFromScreenshotUrl(List<String> screenshotUrls) {
         if (screenshotUrls == null || screenshotUrls.isEmpty()) {
             return null;
@@ -276,6 +314,9 @@ public class RpaCallbackController {
         return null;
     }
 
+    /**
+     * 平台 code -> 中文显示名（用于匹配 worker 回传中文名的场景）。
+     */
     private String getPlatformDisplayName(String platformCode) {
         for (AiPlatform platform : AiPlatform.values()) {
             if (platform.getCode().equals(platformCode)) {
@@ -285,6 +326,9 @@ public class RpaCallbackController {
         return platformCode;
     }
 
+    /**
+     * 平台显示名 -> code（与上一个方法互为反向映射，用于把 worker 传的中文名归一成统一 code）。
+     */
     private String getPlatformCodeFromDisplayName(String displayName) {
         if (displayName == null) {
             return null;

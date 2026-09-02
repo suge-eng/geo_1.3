@@ -1,5 +1,7 @@
 services:
   # ======== 基础中间件（4 个容器，保持与原单体一致）========
+  # MySQL 8 数据库容器：宿主机 3307 → 容器 3306；
+  # 首次启动会用挂载的 schema.sql / init-accounts.sql 自动建库建表。
   mysql:
     image: mysql:8.0
     container_name: geo-mysql
@@ -23,6 +25,7 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # Redis 缓存容器：开启密码(123456)与 AOF 持久化，宿主机 6380 → 容器 6379。
   redis:
     image: redis:7-alpine
     container_name: geo-redis
@@ -40,6 +43,7 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # RabbitMQ 消息队列容器（management 含 Web 管理台）：宿主机 5673→5672(AMQP)、15673→15672(管理台)。
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
     container_name: geo-rabbitmq
@@ -60,6 +64,7 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # MinIO 对象存储容器：宿主机 9002→9000(API)、9001→9001(控制台)，账号 minioadmin。
   minio:
     image: minio/minio:latest
     container_name: geo-minio
@@ -208,12 +213,14 @@ services:
   #     - geo-net
   #   restart: unless-stopped
 
+# 数据卷：为各中间件持久化数据，保证容器重建后数据不丢失
 volumes:
   geo-mysql-data:
   geo-redis-data:
   geo-rabbitmq-data:
   geo-minio-data:
 
+# 自定义桥接网络：让所有容器处于同一内网，可用容器名（如 geo-mysql）互相访问
 networks:
   geo-net:
     driver: bridge

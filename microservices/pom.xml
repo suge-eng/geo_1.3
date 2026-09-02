@@ -4,6 +4,17 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!--
+      ============================================================
+      父工程（聚合工程）POM —— 整个 GEO 品牌分析系统的 Maven 顶层配置。
+      它本身不打包成可运行的 Jar，只负责四件事：
+        1. 定义统一坐标（groupId=com.geo、artifactId=geo-parent、version=1.0.0）；
+        2. 用 <modules> 声明全部子模块，执行一次 mvn 构建即可按顺序打包所有模块；
+        3. 用 <properties> 集中声明各依赖版本号，供子模块统一引用；
+        4. 用 <dependencyManagement> 统一管理依赖版本（只声明版本、不真正引入依赖）。
+      ============================================================
+    -->
+
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
@@ -18,6 +29,15 @@
     <name>geo-parent</name>
     <description>GEO Microservices Parent</description>
 
+    <!--
+      子模块清单 —— 多模块微服务的“成员名单”
+      geo-common          ：公共模块（实体类、DTO、枚举、Mapper 接口），无独立启动入口，被各服务复用
+      geo-task-service    ：任务服务（端口 8081），负责任务拆分、分派、进度与结果汇总
+      geo-analysis-service：分析服务，负责生成品牌分析报告
+      geo-file-service    ：文件服务，作为 MinIO 的代理，提供文件上传/下载
+      geo-rpa-service     ：RPA 服务，接收 worker 脚本的认领/心跳/回调，调度 AI 抓取任务
+      geo-gateway         ：网关服务（端口 8080），对浏览器提供统一入口 + 静态页面
+    -->
     <modules>
         <module>geo-common</module>
         <module>geo-task-service</module>
@@ -27,53 +47,69 @@
         <module>geo-gateway</module>
     </modules>
 
+    <!--
+      依赖版本集中管理区。
+      把版本号写在这里，各模块 pom 里用 ${名字} 引用；以后升级依赖只需改这一处。
+    -->
     <properties>
-        <java.version>17</java.version>
-        <mybatis-plus.version>3.5.5</mybatis-plus.version>
-        <hutool.version>5.8.24</hutool.version>
-        <poi.version>5.2.5</poi.version>
-        <commons-compress.version>1.25.0</commons-compress.version>
-        <minio.version>8.5.7</minio.version>
+        <java.version>17</java.version>                          <!-- JDK 版本：所有模块统一用 Java 17 编译运行 -->
+        <mybatis-plus.version>3.5.5</mybatis-plus.version>       <!-- MyBatis-Plus（MyBatis 增强框架，简化单表增删改查） -->
+        <hutool.version>5.8.24</hutool.version>                  <!-- Hutool 通用工具库（字符串/日期/HTTP/JSON 等） -->
+        <poi.version>5.2.5</poi.version>                         <!-- Apache POI（解析 Excel 上传的题目清单） -->
+        <commons-compress.version>1.25.0</commons-compress.version> <!-- Commons Compress（解压 RPA 上传的压缩包） -->
+        <minio.version>8.5.7</minio.version>                     <!-- MinIO 对象存储 SDK（保存报告与附件文件） -->
     </properties>
 
+    <!--
+      依赖版本统一管理：这里只“声明”版本，不会真正把依赖引入到具体模块。
+      子模块在 <dependencies> 里引用这些依赖时可以省略 <version>，
+      版本由这里继承，保证全项目依赖版本一致。
+    -->
     <dependencyManagement>
         <dependencies>
+            <!-- 本项目自研的公共模块（实体类/DTO/枚举/Mapper 接口），各微服务都会引用 -->
             <dependency>
                 <groupId>com.geo</groupId>
                 <artifactId>geo-common</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
+            <!-- MyBatis-Plus 的 Spring Boot 3 启动器：提供数据库 ORM 能力 -->
             <dependency>
                 <groupId>com.baomidou</groupId>
                 <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
                 <version>${mybatis-plus.version}</version>
             </dependency>
 
+            <!-- Hutool 全量工具包 -->
             <dependency>
                 <groupId>cn.hutool</groupId>
                 <artifactId>hutool-all</artifactId>
                 <version>${hutool.version}</version>
             </dependency>
 
+            <!-- Apache POI：解析 .xls（旧版 Excel）文件 -->
             <dependency>
                 <groupId>org.apache.poi</groupId>
                 <artifactId>poi</artifactId>
                 <version>${poi.version}</version>
             </dependency>
 
+            <!-- Apache POI-OOXML：解析 .xlsx（新版 Excel）文件 -->
             <dependency>
                 <groupId>org.apache.poi</groupId>
                 <artifactId>poi-ooxml</artifactId>
                 <version>${poi.version}</version>
             </dependency>
 
+            <!-- Commons Compress：处理 zip/rar 等压缩包的解压 -->
             <dependency>
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-compress</artifactId>
                 <version>${commons-compress.version}</version>
             </dependency>
 
+            <!-- MinIO 对象存储客户端：上传/下载报告与附件文件 -->
             <dependency>
                 <groupId>io.minio</groupId>
                 <artifactId>minio</artifactId>
@@ -82,8 +118,10 @@
         </dependencies>
     </dependencyManagement>
 
+    <!-- 统一编译配置：所有子模块按同一种 JDK 版本编译，保证产物一致 -->
     <build>
         <plugins>
+            <!-- 编译插件：指定源码与目标字节码都用 Java 17 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>

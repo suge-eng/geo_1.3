@@ -11,23 +11,33 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
+    <!--
+      文件服务（geo-file-service）—— 对 MinIO 的一层“代理封装”。
+      前端与其他服务通过它来上传/下载文件，它内部再与 MinIO 交互，
+      好处是屏蔽 MinIO 细节、便于统一做访问控制与路径约定。
+      本身不依赖数据库，仅依赖公共模块 + Web + MinIO。
+    -->
     <artifactId>geo-file-service</artifactId>
     <name>geo-file-service</name>
     <description>Geo File Proxy Service</description>
 
     <dependencies>
+        <!-- 项目公共模块 -->
         <dependency>
             <groupId>com.geo</groupId>
             <artifactId>geo-common</artifactId>
         </dependency>
+        <!-- Web 能力：提供文件上传/下载 REST 接口 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!-- MinIO 对象存储客户端：真正执行文件的读写 -->
         <dependency>
             <groupId>io.minio</groupId>
             <artifactId>minio</artifactId>
         </dependency>
+        <!-- 单元测试依赖 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -36,8 +46,9 @@
     </dependencies>
 
     <build>
-        <finalName>geo-file-service</finalName>
+        <finalName>geo-file-service</finalName>   <!-- 最终生成的 jar 文件名 -->
         <plugins>
+            <!-- Spring Boot 打包插件：打成可独立运行的 fat jar -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

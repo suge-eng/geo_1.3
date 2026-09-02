@@ -48,10 +48,15 @@ public class RpaWorkerDispatcherService {
     @Transactional
     public TaskResult claimUnit(String platform, String workerId) {
         LocalDateTime now = LocalDateTime.now();
+        // 关键一步：claimNextPending 底层使用 SELECT ... FOR UPDATE SKIP LOCKED，
+        // 并发下多个 worker 同时认领也只会各自拿到「没有被别人锁住」的不同行，
+        // 因此无需任何全局锁即可多机安全分配，先到先得。
         TaskResult unit = taskResultMapper.claimNextPending(platform);
         if (unit == null) {
             return null;
         }
+        // 认领成功立即把单元标记为 RUNNING 并写入租约到期时间（now + leaseSeconds），
+        // started_at 用于后续卡住检测（见 StuckTaskNotifier）。
         taskResultMapper.markRunning(unit.getId(), workerId, now.plusSeconds(leaseSeconds), now);
         unit.setStatus("RUNNING");
         unit.setAssignee(workerId);
@@ -74,6 +79,8 @@ public class RpaWorkerDispatcherService {
             return false;
         }
         int updated = taskResultMapper.extendLease(unitId, workerId, LocalDateTime.now().plusSeconds(leaseSeconds));
+        // extendLease 的 WHERE 同时限定 id 与 worker_id，只有当前持有者能续约成功，
+        // 防止 worker 之间误续对方租约、或单元已被回收后仍被续命。
         return updated > 0;
     }
 
@@ -86,6 +93,7 @@ public class RpaWorkerDispatcherService {
             return;
         }
         int updated = taskResultMapper.releaseToPending(unitId, workerId);
+        // releaseToPending 同样校验 worker_id：仅持有者能归还，避免误伤他人正在执行的单元。
         if (updated > 0) {
             log.info("worker[{}] 中止并归还单元到任务池: unitId={}", workerId, unitId);
         }
@@ -110,6 +118,8 @@ public class RpaWorkerDispatcherService {
             initialDelayString = "${geo.rpa.worker.reclaim-initial-ms:10000}")
     @Transactional
     public void reclaimExpiredUnits() {
+        // cutoff 额外再放宽 60 秒：给「心跳恰好延迟几秒」的 worker 留缓冲，
+        // 只有明显超过一个租约周期仍无心跳的单元才会被判定为已离线而回收，避免误杀。
         LocalDateTime cutoff = LocalDateTime.now().minusSeconds(leaseSeconds + 60);
         int reclaimed = taskResultMapper.reclaimExpiredLease(cutoff);
         if (reclaimed > 0) {

@@ -1,13 +1,28 @@
+/**
+ * geo-gateway 前端主逻辑（Vue3 + ECharts + axios）。
+ *
+ * 整份文件是一个 Vue 应用实例，负责：
+ *   1. 管理页面状态（当前页签、任务列表、表单、报告数据、各类弹窗等）；
+ *   2. 通过 axios 调用后端接口（由 geo-gateway 网关转发到各微服务）；
+ *   3. 用轮询方式定时刷新任务进度与结果（配合后端 WebSocket 推送）；
+ *   4. 用 ECharts 把报告数据绘制成图表。
+ *
+ * 顶部通过 window.GEO_APP_CONFIG 读取后端地址等配置（见 js/config.js），
+ * 并据此判断是否处于“演示模式”（DEMO_MODE=true 时改用 mock-data.js 的假数据）。
+ */
 const { createApp, ref, computed } = Vue
 
+// 读取全局配置；config.js 里没定义时用默认值兜底
 const APP_CONFIG = window.GEO_APP_CONFIG || { DEMO_MODE: false, API_BASE_URL: '' }
 const DEMO_MODE = APP_CONFIG.DEMO_MODE === true
 const MOCK_DATA = window.GEO_MOCK_DATA || null
 
+// 若配置了后端地址，就设为 axios 的统一前缀，之后接口路径只需写 /api/... 即可
 if (APP_CONFIG.API_BASE_URL) {
     axios.defaults.baseURL = APP_CONFIG.API_BASE_URL
 }
 axios.defaults.headers.post['Content-Type'] = 'application/json'
+// 请求拦截器：保证 POST 请求至少带一个空对象作为请求体，避免后端因缺失 body 报错
 axios.interceptors.request.use(config => {
     if (config.method === 'post' && config.data === undefined) {
         config.data = {}
@@ -16,6 +31,12 @@ axios.interceptors.request.use(config => {
 })
 
 const __geoApp = createApp({
+    // data() 返回的对象里的每一项都是“响应式数据”：值变了，页面会自动跟着更新。
+    // 这里集中管理全部页面状态，下面按用途分组说明几个最关键的：
+    //   activeTab / currentView : 控制当前展示哪个页签 / 哪个子视图；
+    //   taskForm               : 新建任务的表单数据（Vue 的 v-model 双向绑定对象）；
+    //   taskList / taskResults : 任务列表、某任务的观测结果；
+    //   reportData             : 数据报告的内容，是渲染图表的直接数据源。
     data() {
         return {
             demoMode: DEMO_MODE,
@@ -129,6 +150,10 @@ const __geoApp = createApp({
         }
     },
     computed: {
+        // 计算属性：不直接存值，而是根据其它数据“计算”得出，且结果会被缓存。
+        // 页面模板里用到的 filteredTaskResults、canSubmit、competitionRankingData 等都是此类。
+
+        // 根据详情页的筛选条件（关键词/层级/展现/舆情/平台/状态）过滤观测结果
         filteredTaskResults() {
             const keyword = this.detailKeyword.trim().toLowerCase()
             return this.taskResults.filter(result => {
@@ -270,6 +295,7 @@ const __geoApp = createApp({
         platformScoreCards() {
             return this.getPlatformScoreCards()
         },
+        // 判断“创建任务”按钮能否点击：手动模式要标题/平台/询问句/品牌填齐，Excel 模式要选文件
         canSubmit() {
             if (this.submitMode === 'manual') {
                 return this.taskForm.title.trim() &&
@@ -284,6 +310,7 @@ const __geoApp = createApp({
             }
         }
     },
+    // 组件挂载后立刻执行：先加载一次任务列表，并按 5 秒间隔轮询“任务池看板”
     mounted() {
         this.loadTaskList()
         // ========== 任务池看板轮询（不需要看板时，把下面 3 行注释掉即可）==========
@@ -292,13 +319,16 @@ const __geoApp = createApp({
         // ========== 任务池看板轮询 END ==========
     },
     watch: {
+        // 监听数据变化后执行副作用：当报告数据整体变化时，把平台筛选重置为“全局”
         reportData() {
             this.comparisonPlatform = 'ALL'
             this.voicePlatform = 'ALL'
         },
+        // 雷达图指标切换时重新绘制竞争图表
         radarMetric() {
             this.$nextTick(() => this.renderCompetitionCharts())
         },
+        // 深度监听曝光指标：报告里的覆盖率/首位率等变化时，重新绘制环形图
         'reportData.exposureMetrics': {
             handler() {
                 if (this.currentView === 'report' && !this.reportLoading) {
@@ -312,6 +342,7 @@ const __geoApp = createApp({
             deep: true
         }
     },
+    // 捕获子组件渲染时的错误并打日志，返回 false 表示“继续向上传递”，目的是避免整页白屏
     errorCaptured(err, vm, info) {
         console.error('[Vue errorCaptured] 阻止白屏，捕获渲染错误:', { err, info, message: err?.message, stack: err?.stack })
         try {
@@ -320,18 +351,23 @@ const __geoApp = createApp({
         } catch (_) {}
         return false
     },
+    // 当根组件本身渲染出错时，降级显示一段错误提示，避免白屏
     renderError(h, err) {
         console.error('[Vue renderError] 渲染阶段出错，降级为错误提示:', err?.message, err?.stack)
         return h('div', {
             style: { padding: '20px', color: '#c33', background: '#fff5f5', borderRadius: '8px', margin: '10px', fontSize: '14px' }
         }, ['页面渲染出错：' + (err?.message || '未知错误') + '，请打开控制台查看详细堆栈'])
     },
+    // 组件销毁前清理所有定时器，避免页面关闭后后台还在轮询
     beforeUnmount() {
         if (this.progressInterval) clearInterval(this.progressInterval)
         if (this.resultInterval) clearInterval(this.resultInterval)
         if (this.poolInterval) clearInterval(this.poolInterval)
     },
+    // methods 里是页面所有可调用的方法，模板中的 @click、@change 等事件都指向这里。
+    // 大致分几类：任务提交/操作、结果筛选与导出、弹窗控制、报告加载、图表渲染、工具函数。
     methods: {
+        // 创建任务：手动模式走 JSON 接口，Excel 模式用 multipart 表单上传文件
         async createTask() {
             if (!this.canSubmit) return
             if (DEMO_MODE) {
@@ -714,6 +750,7 @@ const __geoApp = createApp({
         },
         // ========== 任务池看板 END ==========
 
+        // 打开任务详情：先拉一次进度和结果，若任务仍在执行就用定时器轮询刷新
         async selectTask(task) {
             this.selectedTask = task
             this.taskResultsTaskNo = null
@@ -733,6 +770,7 @@ const __geoApp = createApp({
             if (this.progressInterval) clearInterval(this.progressInterval)
             if (this.resultInterval) clearInterval(this.resultInterval)
 
+            // 仅当任务还在跑的时候才轮询，避免对已结束任务做无意义请求
             if (task.status === 'RUNNING' || task.status === 'PENDING' || task.status === 'PROCESSING') {
                 this.progressInterval = setInterval(() => this.loadProgress(), 2000)
                 this.resultInterval = setInterval(() => this.loadResults(), 3000)
@@ -751,6 +789,7 @@ const __geoApp = createApp({
             this.currentView = 'list'
         },
 
+        // 拉取当前任务的进度（已完成/总数/百分比），失败时用 task 自带的数据兜底展示
         async loadProgress() {
             if (!this.selectedTask) return
             if (DEMO_MODE && this.selectedTask.isDemo) {
@@ -786,6 +825,7 @@ const __geoApp = createApp({
             }
         },
 
+        // 拉取当前任务的观测结果列表（详情页表格的数据源）
         async loadResults() {
             if (!this.selectedTask) return
             if (DEMO_MODE && this.selectedTask.isDemo) {
@@ -848,6 +888,7 @@ const __geoApp = createApp({
             return []
         },
 
+        // 导出详情/联网记录为 CSV 文件（在浏览器端生成并触发下载）
         exportDetailCsv(includeNetworkRecords = false) {
             const selectedResults = this.selectedTaskResults
             if (selectedResults.length === 0) {
@@ -1316,6 +1357,8 @@ const __geoApp = createApp({
                 return this._escapeHtml(String(text || ''))
             }
         },
+        // 把 AI 回答文本渲染成安全的 HTML：先清理/转换 Markdown，再做标签白名单过滤，
+        // 防止 AI 返回的内容夹带脚本注入（见 _sanitizeAiHtml）。
         renderMarkdown(text) {
             if (!text || !String(text).trim()) return ''
             try {
@@ -1468,6 +1511,8 @@ const __geoApp = createApp({
             this.showToast('引用源功能开发中', 'success')
         },
 
+        // 报告数据中的字段名/结构可能不完整，这里做“归一化”：
+        // 把所有缺失字段补成安全的默认值，保证后续图表渲染不会因字段为空而报错。
         normalizeReportData() {
             if (!this.reportData || typeof this.reportData !== 'object') this.reportData = {}
             const rd = this.reportData
@@ -1583,6 +1628,7 @@ const __geoApp = createApp({
             }
         },
 
+        // 轻提示：弹出一条成功/错误信息，3 秒后自动消失
         showToast(message, type) {
             this.toast = { show: true, message, type }
             setTimeout(() => {
@@ -1806,6 +1852,7 @@ const __geoApp = createApp({
             }
         },
 
+        // 打开单任务数据报告页（见下方 loadReport 的实现）
         async openReport() {
             if (!this.selectedTask) return
             try {
@@ -1865,6 +1912,8 @@ const __geoApp = createApp({
             this.normalizeReportData()
         },
 
+        // 加载报告：请求报告接口，接口可能立即返回报告，也可能返回“生成中”，
+        // 后一种情况由 handleReportResponse 判断并进行轮询等待。
         async loadReport() {
             if (!this.selectedTask) return
             this.isGlobalReport = false
@@ -1899,6 +1948,9 @@ const __geoApp = createApp({
             }
         },
 
+        // 报告接口的响应有多种形态，这里统一“分流”处理：
+        //   1. 直接带有报告数据 → 直接用；
+        //   2. 返回 202 或“生成中”状态 → 调用 pollReportUntilReady 轮询等待完成。
         async handleReportResponse(res, platformOptionsPromise) {
             const status = res.status
             const payload = res.data?.data
@@ -1973,6 +2025,7 @@ const __geoApp = createApp({
             })
         },
 
+        // 轮询等待后端异步生成报告：每隔 2 秒查一次状态，直到 COMPLETED / FAILED / 超时。
         async pollReportUntilReady(taskNo) {
             const maxAttempts = 600
             const intervalMs = 2000
@@ -2077,6 +2130,7 @@ const __geoApp = createApp({
             }
         },
 
+        // 渲染全部的 ECharts 图表。每个子渲染独立 try/catch，单个图失败不影响其它图。
         renderAllCharts() {
             try {
                 this.renderExposureRings()
@@ -2784,6 +2838,7 @@ const __geoApp = createApp({
                 : { value: normalizedValue, label: normalizedLabel }
         },
 
+        // 兜底获取报告里可选的平台列表：优先用已加载的结果反推，否则再请求结果接口
         async loadReportPlatformFallbacks() {
             const task = this.selectedTask || this.reportHistoryTask
             const taskNo = task?.taskNo
@@ -3249,6 +3304,7 @@ const __geoApp = createApp({
             this.$nextTick(() => this.renderCompetitionCharts())
         },
 
+        // 绘制竞争力相关的图表：综合得分仪表盘、品牌声量柱状图、多品牌雷达图
         renderCompetitionCharts() {
             if (typeof echarts === 'undefined') return
             const createChart = (id, option, onReady) => {
@@ -3438,6 +3494,7 @@ const __geoApp = createApp({
             })
         },
 
+        // 绘制“全局报告”专属的历史趋势折线图（声量/引用热度/正向率/定位贴合度）
         renderGlobalTrendCharts() {
             if (typeof echarts === 'undefined') return
             try {
@@ -3536,6 +3593,7 @@ const __geoApp = createApp({
             }
         },
 
+        // 绘制品牌曝光区的几个环形图（覆盖率、首位率、前三率、前五率）
         renderExposureRings() {
             try {
                 const metrics = this.reportData.exposureMetrics || {}
@@ -3658,6 +3716,8 @@ const __geoApp = createApp({
     }
 })
 
+// ===== 以下是对 Vue/浏览器全局错误的兜底拦截，核心目标是“任何异常都不能让页面白屏” =====
+
 try {
     __geoApp.config.errorHandler = function (err, vm, info) {
         console.error('[Vue errorHandler 拦截-阻止白屏]', { message: err?.message, info, stack: err?.stack })
@@ -3672,6 +3732,7 @@ try {
     }
 } catch (_) {}
 
+// 监听全局未捕获错误与未处理的 Promise 拒绝，统一打日志便于排查
 window.addEventListener('error', function (e) {
     console.error('[window.error 兜底]', { message: e?.message, file: e?.filename, line: e?.lineno, col: e?.colno, stack: e?.error?.stack })
     const msg = String(e?.message || '')
@@ -3686,4 +3747,5 @@ window.addEventListener('unhandledrejection', function (e) {
     console.error('[Promise未处理rejection]', e?.reason?.message, e?.reason?.stack)
 })
 
+// 最后把整个应用挂载到 index.html 的 #app 节点上，页面正式开始渲染
 window.app = __geoApp.mount('#app')

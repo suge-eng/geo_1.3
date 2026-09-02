@@ -1,6 +1,10 @@
 @echo off
-REM Build all 5 microservice executable jars. Run from this folder.
-REM This script auto-discovers JAVA_HOME so you don't need to set it manually.
+chcp 65001 >nul
+REM ---------------------------------------------------------------------
+REM Packaging script: compile and package all 5 services into executable jars.
+REM Run this from the microservices directory.
+REM Flow: auto-detect JDK -> install geo-common to local repo -> package each service.
+REM ---------------------------------------------------------------------
 setlocal
 
 REM ================================
@@ -43,11 +47,13 @@ cd /d "%BD%"
 
 echo.
 echo === Step 1/2: Install geo-common to local Maven repo ===
+REM Install geo-common first because all other service poms depend on it.
 call mvn -pl geo-common -am -DskipTests install -q
 if errorlevel 1 (echo BUILD FAIL: geo-common install & pause & exit /b 1)
 
 echo.
 echo === Step 2/2: Package each service ===
+REM Package each of the 5 services. -am also builds geo-common if needed.
 for %%S in (geo-task-service geo-analysis-service geo-file-service geo-rpa-service geo-gateway) do (
     echo Packaging %%S ...
     call mvn -pl %%S -am -DskipTests package -q

@@ -11,36 +11,47 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
+    <!--
+      网关服务（geo-gateway，端口 8080）—— 系统的“统一入口”。
+      对浏览器提供静态页面（前端 HTML/JS），并把前端的请求转发（路由）到后面的各微服务；
+      同时用 WebSocket 向前端推送任务进度等实时消息。
+    -->
     <artifactId>geo-gateway</artifactId>
     <name>geo-gateway</name>
     <description>GEO Gateway Microservice (port 8080)</description>
 
     <dependencies>
+        <!-- 项目公共模块 -->
         <dependency>
             <groupId>com.geo</groupId>
             <artifactId>geo-common</artifactId>
         </dependency>
 
+        <!-- Web 能力：承载静态页面 + 反向代理/路由 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- WebSocket：向前端实时推送任务进度/状态变更 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-websocket</artifactId>
         </dependency>
 
+        <!-- Redis：作为 WebSocket 消息的发布/订阅通道或会话缓存 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- 请求参数校验 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!-- 单元测试依赖 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -49,8 +60,9 @@
     </dependencies>
 
     <build>
-        <finalName>geo-gateway</finalName>
+        <finalName>geo-gateway</finalName>   <!-- 最终生成的 jar 文件名 -->
         <plugins>
+            <!-- Spring Boot 打包插件：打成可独立运行的 fat jar -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

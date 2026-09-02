@@ -11,42 +11,53 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
+    <!--
+      分析服务（geo-analysis-service）—— 负责把收集到的抓取结果“加工成报告”。
+      读取任务结果数据，计算各品牌的曝光度、排名、关键词、情绪等指标，生成品牌分析报告。
+    -->
     <artifactId>geo-analysis-service</artifactId>
     <name>geo-analysis-service</name>
     <description>GEO Analysis Report Microservice</description>
 
     <dependencies>
+        <!-- 项目公共模块 -->
         <dependency>
             <groupId>com.geo</groupId>
             <artifactId>geo-common</artifactId>
         </dependency>
 
+        <!-- Web 能力：提供报告生成/查询等 REST 接口 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- MyBatis-Plus：查询任务结果数据用于统计 -->
         <dependency>
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
         </dependency>
 
+        <!-- MySQL 驱动（仅运行期） -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Redis：缓存已生成的报告，减轻重复计算压力 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- Hutool 工具库 -->
         <dependency>
             <groupId>cn.hutool</groupId>
             <artifactId>hutool-all</artifactId>
         </dependency>
 
+        <!-- 单元测试依赖 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -55,8 +66,9 @@
     </dependencies>
 
     <build>
-        <finalName>geo-analysis-service</finalName>
+        <finalName>geo-analysis-service</finalName>   <!-- 最终生成的 jar 文件名 -->
         <plugins>
+            <!-- Spring Boot 打包插件：打成可独立运行的 fat jar -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

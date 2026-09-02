@@ -1,3 +1,22 @@
+"""
+doubao.py —— 豆包（Doubao）平台的 RPA 自动化脚本，系统「工人」之一。
+
+角色与流程和 deepseek.py 完全一致：用 Playwright 驱动 Edge 登录豆包网页版，
+然后不断从后端任务池认领「1 问题 × 1 豆包」的最小单元，让 AI 回答、截图、回调。
+区别只在于「豆包这个网页具体怎么操作、怎么取内容」。
+
+豆包相比 DeepSeek 多出三个难点（也正是本脚本最有价值的设计）：
+
+1. 反爬 / 验证码页：豆包经常弹安全验证。verify() 负责检测验证码；ready() 检测到后
+   会调用 input() 暂停，等人工在浏览器里完成验证、按 Enter 再继续——
+   这就是「卡住时不傻等、把决定权交回给人」的解法（对应后端的卡住邮件通知）。
+
+2. 虚拟滚动列表：豆包的聊天记录是虚拟滚动渲染，直接 full_page 截图截不到完整内容，
+   所以 shot() 采用「把问题 + 回答的 DOM 克隆到一个新容器里再截图」的办法绕开。
+
+3. 思考内容识别：豆包把思考过程、搜索结果、正文揉在同一个消息块里，MESSAGES 里
+   用一大段注入 JS 做启发式分离，分别归类为 answer / thinking / sources。
+"""
 import json
 import os
 import random
@@ -25,6 +44,12 @@ PLACEHOLDER = "发消息或按住空格说话..."
 
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
+# 一段注入到页面的 JS，作用是把「一个 AI 回答消息块」拆解成结构化的三部分：
+#   answer(正文) / thinking(思考过程 + 搜索引用) / sources(引用的网页来源)。
+# 之所以写这么长，是因为豆包的 DOM 没有稳定 class 可依，只能靠启发式规则：
+#   先定位正文容器(md-box-root 等)，再在正文"之前"的兄弟节点里找思考块，去重、
+#   剔除"搜索 N 个关键词"这类摘要行，最后从 tool-call 链接里摘出来源 URL。
+# 每个步骤都带"找不到就跳过/置空"的兜底，网页改版后顶多是某部分为空，不会崩。
 MESSAGES = r"""() => [...document.querySelectorAll('[data-message-id]')].map(m => {
   const bodySelectors=['.md-box-root','[class*="md-box-root"]','[class*="prose"]','[class*="markdown"]','[class*="answer"]','.ProseMirror','[data-message-body]'];
   let body=null; for(const s of bodySelectors){body=m.querySelector(s);if(body&&(body.innerText||'').trim())break}
@@ -121,6 +146,9 @@ MESSAGES = r"""() => [...document.querySelectorAll('[data-message-id]')].map(m =
   return {id:m.dataset.messageId||'',answer:answerHtml,thinking,sources};
 }).filter(Boolean)"""
 
+# 注入 JS 用于「展开」折叠的思考区域：遍历消息里所有像按钮的可点击元素，找到带
+# 「思考 / 深度思考 / 搜索 N 个关键词」文案的那个点开。同样不写死具体选择器，
+# 靠文案匹配，改版后依然大概率能命中，返回实际点击次数。
 EXPAND = r"""id => {
   const clean=s=>(s||'').replace(/\s+/g,' ').trim(), m=[...document.querySelectorAll('[data-message-id]')].find(x=>x.dataset.messageId===id);
   if(!m)return 0;
@@ -145,15 +173,23 @@ EXPAND = r"""id => {
 
 
 def human_wait(a=1, b=3):
+    """随机停顿，模拟真人节奏，降低被反爬识别/弹验证码的概率。"""
     time.sleep(random.randint(a, b))
 
 
 def messages(page):
+    """把页面里所有 AI 回答消息块解析成结构化列表，供后续定位和判稳使用。"""
     value = page.evaluate(MESSAGES)
     return value if isinstance(value, list) else []
 
 
 def verify(page):
+    """检测当前页面是否弹出了验证码 / 安全验证。
+
+    设计思路：豆包偶尔会弹验证码，此时脚本继续操作也没用。所以用几个关键词
+    （captcha / 安全验证 / 请完成验证 / 拖拽到这里）在页面文本里做一次粗检，
+    发现问题就交给上层 ready() 暂停、等人工处理。
+    """
     try:
         text = page.locator("body").inner_text(timeout=2000).lower()
         return any(x in text for x in ("captcha", "安全验证", "请完成验证", "拖拽到这里"))
@@ -162,6 +198,12 @@ def verify(page):
 
 
 def input_box(page):
+    """定位输入框。按优先级依次尝试多个候选选择器，取第一个可用的。
+
+    设计思路：豆包不同版本/不同页面输入框的实现会变（contenteditable 的 div 或
+    textarea）。把候选选择器列成表逐个 try，第一个能匹配到可见元素的就返回，
+    比死磕单一选择器稳得多。
+    """
     selectors = [
         f'div[contenteditable="true"]:has(p[data-placeholder="{PLACEHOLDER}"]):visible',
         f'div[contenteditable="true"][role="textbox"]:visible',
@@ -180,6 +222,15 @@ def input_box(page):
 
 
 def ready(page):
+    """保证「能开始提问」：没验证码就返回输入框；有验证码就暂停等人处理。
+
+    设计思路（处理卡住的关键）：
+      1. 先 verify 检查是否弹验证码；
+      2. 没验证码 -> 尝试取输入框并点击聚焦，成功就返回；
+      3. 有验证码（或取不到输入框）-> 调 input() 阻塞等待，让用户去浏览器里
+         手动完成登录/验证，确认后再按 Enter 继续。
+    这样脚本遇到验证码不会陷入"反复点击失败"的死循环，而是把控制权交回给真人。
+    """
     while True:
         if not verify(page):
             try:
@@ -192,6 +243,7 @@ def ready(page):
 
 
 def expand(page, message_id):
+    """展开某个回答的折叠思考区域（失败只记日志、不中断流程）。"""
     try:
         clicked = page.evaluate(EXPAND, message_id)
     except Exception as e:
@@ -203,6 +255,15 @@ def expand(page, message_id):
 
 
 def wait_answer(page, old_ids):
+    """等待新的 AI 回答生成完毕并稳定。
+
+    设计思路（和 deepseek 的 wait_answer_finish 同一套"稳定性判据"思想）：
+      1. old_ids 是提问前已存在的消息 id 集合，之后每轮只关注"新出现"的消息；
+      2. 取最新那条新消息，比较它的 id 和正文文本，连续 6 次不变（stable>=6）
+         且长度>=10 才认为生成结束；
+      3. 等正文稳定的同时，抽空展开该回答的折叠思考区再返回完整消息。
+    额外：如果中途 verify() 发现弹了验证码，立刻抛异常交给上层 ask() 处理.
+    """
     end, last_id, last_text, stable = time.time() + 300, "", "", 0
     while time.time() < end:
         if verify(page):
@@ -223,6 +284,17 @@ def wait_answer(page, old_ids):
 
 
 def ask(page, question):
+    """发送一个问题并等它出结果，是整个豆包工人的核心动作。
+
+    设计思路（为什么这么长、这么多分支）：
+      1. 输入框有两种实现：contenteditable 的 div 和 textarea。前者不能直接 fill，
+         需要用 JS 往 DOM 里塞一个 <p> 并触发 input 事件，让框架感知到输入；
+      2. 发送也有多种途径：Enter、发送按钮、最后 JS 兜底点击，逐个尝试；
+      3. 外层 for attempt in range(2) 做重试：如果等待回答时遇到验证码抛异常，
+         第一次先调 ready() 让用户人工处理 + 等 20 秒，再重试当前问题；
+         第二次再失败才真正抛出去（避免同一问题无限重试）。
+    这套"多途径输入/发送 + 遇验证码人工介入后重试"是本脚本最抗折腾的地方。
+    """
     for attempt in range(2):
         page.goto(URL, wait_until="domcontentloaded", timeout=60000)
         time.sleep(random.uniform(2, 5))
@@ -321,6 +393,7 @@ def ask(page, question):
 
 
 def sources_text(items):
+    """把来源列表（[{title, url}]）转成固定格式的文本，方便存库/展示。"""
     result, seen = [], set()
     for item in items or []:
         title, url = str(item.get("title", "")).strip(), str(item.get("url", "")).strip()
@@ -331,10 +404,21 @@ def sources_text(items):
 
 
 def safe_name(s):
+    """把任意字符串变成可安全用于文件名的形式（去非法字符、截断长度）。"""
     return "".join("_" if c in '<>:"/\\|?*' else c for c in " ".join(str(s).split()))[:80]
 
 
 def shot(page, message_id, save_path):
+    """给某个回答截图，采用「克隆 DOM 再截图」的方案。
+
+    设计思路（绕开豆包的虚拟滚动列表）：
+      豆包聊天页用虚拟滚动渲染，视口外的内容根本不进 DOM，所以 full_page 截图
+      会截不到完整回答。这里的做法是注入 JS：找到该回答所在的"行"，连同上一条
+      （问题行）一起 cloneNode 复制到一个绝对定位、固定宽度、强制展开所有折叠/
+      隐藏样式的新容器 #doubao-shot-clone 里，再只对这个容器截图。
+      这样既绕开了虚拟滚动，又能只截"问题 + 回答"这段，图又全又干净。
+    若克隆截图失败，就退回到 full_page 整页截图兜底。
+    """
     try:
         loc = page.locator(f'[data-message-id="{message_id}"]').last
         loc.wait_for(state="visible", timeout=10000)
@@ -443,7 +527,15 @@ def shot(page, message_id, save_path):
 
 
 def handle_unit(page, unit):
-    """处理单个任务单元（1 问题 x 1 豆包 = 1 条 task_result）。由 worker 循环调用。"""
+    """处理单个任务单元（1 问题 x 1 豆包 = 1 条 task_result）。由 worker 循环调用。
+
+    单元即后端任务池派发的最小工作项，含 id/taskNo/aiPlatform/questionText。
+
+    流程：ask 发送并等回答 -> 取下 answer/thinking/sources -> shot 截图 ->
+          上传截图 -> 回调结果。
+    异常设计同 deepseek：无论成败都必须回调（SUCCESS/FAILED），让单元有明确终态，
+    否则后端只能等租约超时回收、白白多等。
+    """
     task_no = str(unit.get("taskNo"))
     agent_name = unit.get("aiPlatform") or "doubao"
     question = str(unit.get("questionText") or "")
@@ -500,6 +592,12 @@ def handle_unit(page, unit):
 
 
 def main():
+    """进程入口：打开浏览器、就绪后进入认领循环。
+
+    关键设计同 deepseek.py：persistent_context 持久化登录态；channel="msedge" 复用
+    系统 Edge；headless=False 有头运行便于人工登录/验证/排查。区别是这里用
+    no_viewport=True + --start-maximized 让窗口最大化，避免截图像素太小。
+    """
     log("启动豆包 Worker（认领模式，无全局锁）")
     log("打开浏览器...")
     with sync_playwright() as p:

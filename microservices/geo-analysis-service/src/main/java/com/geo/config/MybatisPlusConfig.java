@@ -10,6 +10,17 @@ import org.springframework.context.annotation.Configuration;
 
 import java.time.LocalDateTime;
 
+/**
+ * 【MyBatis-Plus配置 - ORM增强】
+ * 设计思路：
+ * 1. 分页插件（PaginationInnerInterceptor）：
+ *    - MyBatis-Plus的IPage分页方法依赖这个拦截器，否则物理分页不生效（会返回全部数据再内存分页）
+ *    - 绑定MySQL方言，针对SQL优化
+ * 2. 元数据自动填充（MetaObjectHandler）：
+ *    - 避免在业务代码中重复写"setCreatedAt(now)、setUpdatedAt(now)"
+ *    - 新增时自动填createdAt和updatedAt；更新时自动填updatedAt
+ *    - 要求实体字段上加@TableField(fill=INSERT)或@TableField(fill=INSERT_UPDATE)才会生效
+ */
 @Configuration
 public class MybatisPlusConfig {
 

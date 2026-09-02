@@ -1,3 +1,26 @@
+"""
+qianwen.py —— 千问（Qwen）平台的 RPA 自动化脚本，系统「工人」之一。
+
+一、角色与整体流程（和 deepseek.py / kimi.py / doubao.py 一致）
+--------------------------------------------------------------
+用 Playwright 驱动本机 Edge 登录千问网页版，不断从后端「任务池」认领「1 问题 ×
+1 千问」的最小单元，让 AI 回答、截图、回调。主循环 run_worker_loop() 里的并发安全
+全部由后端（租约 + 原子认领）保证，脚本自身无全局锁，可多机并行。
+
+二、千问平台特有的难点（本脚本最值得学习的设计）
+------------------------------------------------
+1. 思考模式要手动切换：千问默认可能是「快速回答」模式，需要先把模型切到「思考研究」
+   模式（enable_thinking()），才能拿到深度思考内容；切换入口是页面里的下拉菜单。
+2. 回答完成判定靠「完成锚点」：wait_for_answer() 用 id 前缀 multi-message-card-
+   finish-anchor-* 的出现 + 底部反馈工具条 + 文本 2 秒不变来判定生成结束。
+3. 思考/正文混在消息流里：千问把搜索步骤、思考、正文按时间顺序铺成一张卡片流，
+   extract_thinking()/extract_answer() 用大段注入 JS 做启发式分离（去重、按位置
+   归类、剥离样式）。
+4. 长截图用「临时放大视口」方案：capture_screenshot() 不是克隆 DOM，而是先量出内容
+   高度，然后临时把浏览器视口拉高到这个高度再 clip 截图：这样真实还原滚动列表的
+   「问题+思考+答案+来源」完整长图。
+"""
+
 import json
 import os
 import random
@@ -24,12 +47,16 @@ QWEN_URL = "https://www.qianwen.com/chat"
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 
+# ============================ 基础工具 ============================
 def log(msg):
+    # 带时间戳打印，flush=True 保证日志实时刷到控制台（避免缓冲导致"半天没输出"）。
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {msg}", flush=True)
 
 
 def visible(locator):
+    # 安全判断某个 Locator 是否「存在且可见」，任何异常都当作不可见处理。
+    # 因为 AI 平台页面经常动态渲染/重排，元素可能瞬间消失，这里必须容错。
     try:
         return locator.count() > 0 and locator.is_visible()
     except Exception:
@@ -37,6 +64,8 @@ def visible(locator):
 
 
 def input_box(page):
+    # 千问输入框是 Slate 富文本编辑器（contenteditable + [role=textbox]），不是普通 textarea。
+    # 用这一长串选择器精准锁定；取 .last 是因为页面可能残留多个编辑器节点。
     locator = page.locator(
         '[data-chat-input-body="true"] '
         '[role="textbox"][contenteditable="true"][data-slate-editor="true"]'
@@ -47,6 +76,8 @@ def input_box(page):
 
 
 def wait_for_login(page):
+    # 在 300 秒内轮询等待登录后的输入框出现。轮询而非一次性 wait 的目的：
+    # 登录过程可能经历跳转/重渲染，输入框不会立刻出现，需要反复探测。
     log("等待登录后的输入框")
     deadline = time.time() + 300
     while time.time() < deadline:
@@ -58,6 +89,8 @@ def wait_for_login(page):
 
 
 def ready(page):
+    # 就绪判断：先尝试自动等待登录完成；若超时则进入「人工兜底」——在控制台阻塞等
+    # 用户手动登录后按 Enter，再继续。这对应"遇到登录/验证码时把决定权交回给人"的思路。
     log("等待千问登录...")
     try:
         wait_for_login(page)
@@ -76,6 +109,8 @@ def ready(page):
 
 
 def new_chat(page):
+    # 新建一个对话并返回输入框。优先点「新建对话」按钮（能清空上下文、避免上一次
+    # 会话内容串味）；没有按钮就直接跳转千问首页。然后等待输入框出现。
     buttons = page.get_by_role("button", name="新建对话", exact=True)
     if buttons.count() > 0 and buttons.first.is_visible():
         buttons.first.click()
@@ -93,6 +128,14 @@ def new_chat(page):
 
 
 def enable_thinking(page):
+    # 把千问模型切到「思考研究」模式，才能拿到深度思考内容。
+    #
+    # 为什么这里这么复杂？千问的思考模式入口不固定，可能是一个 aria-haspopup 下拉
+    # 按钮（"快速功能/思考研究"），也可能直接是一个"思考"文字按钮。所以函数里写了
+    # 两段探测：
+    #   第一段：遍历所有下拉按钮，找到带"快速"或"思考研究"文案的，点开后勾选"思考研究"项；
+    #   第二段（兜底）：找不到下拉就去找"思考"文字直接点一下。
+    # 这种「多路径探测 + 逐条 try」的写法，是为了兼容千问改版后入口变化的场景。
     dropdowns = page.locator('button[aria-haspopup="menu"]')
     for index in range(dropdowns.count() - 1, -1, -1):
         button = dropdowns.nth(index)
@@ -133,6 +176,9 @@ def enable_thinking(page):
 
 
 def send_question(page, question):
+    # 填写问题并发送。填写后随机等 2~5 秒（模拟真人键入节奏），再点"发送消息"按钮，
+    # 没有按钮就按 Enter。force=True 表示忽略元素可见性检查强行操作，应对千问按钮
+    # 有时被浮层遮挡的情况。
     box = input_box(page)
     if box is None:
         raise RuntimeError("找不到输入框")
@@ -154,6 +200,8 @@ def send_question(page, question):
 
 
 def visible_answer(page):
+    # 返回当前页面里最后一条可见的「回答卡片」。倒序遍历是因为回答通常追加在最后，
+    # 从后往前找能最快定位到最新一条。
     answers = page.locator(".answer-common-card")
     for index in range(answers.count() - 1, -1, -1):
         answer = answers.nth(index)
@@ -163,6 +211,14 @@ def visible_answer(page):
 
 
 def wait_for_answer(page, timeout_minutes=20):
+    # 等待回答生成完成。
+    #
+    # 完成判定的三个条件（都必须满足）：
+    #   1. 出现了 id 以 multi-message-card-finish-anchor- 开头的"完成锚点"，这是千问
+    #      在回答真正结束时插入的隐藏标记；
+    #   2. 回答卡片的底部"反馈工具条"（复制/点赞等按钮）已经出现，说明回答已渲染收尾；
+    #   3. 正文文本连续两轮（约 4 秒）不变，说明不再流式追加。
+    # 用"完成锚点 + 工具条 + 文本稳定"三重判定比只看一个信号更可靠。
     deadline = time.time() + timeout_minutes * 60
     last_log = time.time()
     previous = ""
@@ -201,6 +257,11 @@ def wait_for_answer(page, timeout_minutes=20):
 
 
 def extract_answer(page):
+    # 提取最终回答正文（保留 HTML 结构）。
+    #
+    # 用注入 JS 的原因和 kimi.py 的 message_data 一样：要干净地剥离按钮/脚本/样式等
+    # 噪音、只保留 Markdown 渲染后的正文本体。策略：从最后一条可见回答卡片里取
+    # .qk-markdown，做 cleanHtml 清洗；卡片取不到就退到全局 .qk-markdown 兜底。
     log("提取回答内容 (HTML格式)")
     try:
         answer_content = page.evaluate(
@@ -259,6 +320,9 @@ def extract_answer(page):
 
 
 def thinking_workflow(answer):
+    # 在回答卡片所属的「回答包裹容器」（data-chat-answers-wrap）里找到思考/工作流卡片
+    # （data-card_name 为 deep_think 或 bar_workflow），返回可见的那一个，找不到返回 None。
+    # 这是展开/提取思考的真正作用域：思考内容不一定紧贴正文，而是散在包裹容器的子卡片里。
     response = answer.locator(
         "xpath=ancestor::*[@data-chat-answers-wrap][1]"
     )
@@ -274,6 +338,16 @@ def thinking_workflow(answer):
 
 
 def extract_thinking(page):
+    # 提取深度思考内容（保留 HTML）。这是千问脚本里最"绕"的一段，因为它用大段注入 JS
+    # 做了启发式分离：
+    #   1. 定位到"回答包裹容器"里的最后一条回答卡片，作为"答案起点"；
+    #   2. 把位于答案卡片上方（rect.top < answerTop）的 message-card / deep_think /
+    #      bar_workflow 卡片收集为"思考步骤"，按 DOM 垂直位置排序；
+    #   3. 对每张步骤卡片，分别尝试提取：步骤标题、Markdown 正文、搜索关键词、引号内
+    #      的引用语、相关搜索 pill 等，并用 sameContent()/seenTexts 去重，避免重复；
+    #   4. 都取不到时，退到全容器兜底。
+    # 之所以这么复杂，是因为千问把"搜索 → 思考 → 回答"揉进同一条消息流，没有干净的
+    # 分界线，只能靠结构和文本特征去猜。
     log("提取思考内容(HTML格式)")
     try:
         thinking_content = page.evaluate(
@@ -501,7 +575,13 @@ def extract_thinking(page):
         return ""
 
 def expand_thinking(page):
-    """展开当前回答的思考区域，便于阅读和截图。"""
+    """展开当前回答的思考区域，便于阅读和截图。
+
+    千问的思考默认折叠（用 .grid.opacity-0 隐藏）。这里先找展开开关（cursor-pointer
+    或"已完成思考/深度思考已完成"文字），点它；若点击后仍没展开，就退而求其次——直接
+    注入样式把 .grid 的 grid-template-rows/opacity/max-height/overflow 强制改掉，
+    强行让折叠内容显示出来（截图前这么改是安全的，只影响展示不影响功能）。
+    """
     answer = visible_answer(page)
     if answer is None:
         return False
@@ -542,6 +622,10 @@ def expand_thinking(page):
     return expanded
 
 def extract_sources(page, close=True):
+    # 提取回答引用的"参考来源"网址。
+    # 千问的来源藏在右侧面板里，卡片本身不直接放 url，而是把数据塞进 HTML 属性
+    # data-extra / data-exposure-extra 的 JSON 里（经过 html 转义），所以要 json.loads
+    # 解析出来取 ref_url/title。close=True 时用 Esc 关闭面板。
     answer = visible_answer(page)
     if answer is None:
         return []
@@ -612,7 +696,18 @@ def safe_filename(text):
 
 
 def capture_screenshot(page, number, question, save_path):
-    """保存最新问题、完整思考、回答和右侧来源长截图。"""
+    """保存最新问题、完整思考、回答和右侧来源长截图。
+
+    设计思路（不同于 kimi/doubao 的"克隆 DOM"，这里用"临时放大视口"）：
+      千问是左右两栏滚动布局（左：对话流，右：来源面板）。要截完整长图，做法是——
+      1. 先注入 JS 把折叠的思考区强制展开、把各滚动容器(主滚动区 + 来源列表)滚回顶部，
+         并量出主内容/回答/来源各自的高度；
+      2. 取这些高度的最大值，临时把浏览器视口高度 set_viewport_size 拉大到这个值；
+      3. 用 clip 只截"内容区"那一块（x 从内容左边界起、宽到视口右缘、高为算出高度）；
+      4. finally 里必须把视口还原回原来的尺寸，避免影响后续操作。
+    之所以用"放大视口+clip"而不是克隆 DOM，是因为千问的长列表结构复杂、克隆容易丢
+    交互样式，放大视口能最真实地还原页面原貌。
+    """
     viewport = page.viewport_size or {"width": 1280, "height": 900}
     dimensions = page.evaluate(
         """() => {
@@ -699,7 +794,15 @@ def capture_screenshot(page, number, question, save_path):
 
 
 def handle_unit(page, unit):
-    """处理单个任务单元（1 问题 x 1 千问 = 1 条 task_result）。由 worker 循环调用。"""
+    """处理单个任务单元（1 问题 x 1 千问 = 1 条 task_result）。由 worker 循环调用。
+
+    流程：新建对话 -> 切思考模式 -> 提问 -> 等回答 -> 提取正文/思考/来源 -> 长截图
+    -> 上传截图 -> 回调结果。
+
+    异常处理设计（重要）：无论成功失败最终都必须回调一次置为该单元终态（SUCCESS /
+    FAILED），否则后端只能等租约超时回收，白白多等。所以 try 成功走 SUCCESS，except
+    兜底走 FAILED。
+    """
     task_no = str(unit.get("taskNo"))
     agent_name = unit.get("aiPlatform") or "qianwen"
     question = str(unit.get("questionText") or "")
@@ -777,6 +880,9 @@ def handle_unit(page, unit):
 
 
 def main():
+    # 入口：启动浏览器 -> 登录 -> 进入认领循环。
+    # launch_persistent_context + user_data_dir 持久化登录态；--disable-blink-features
+    # =AutomationControlled 隐藏自动化特征、降低反爬风险；headless=False 用可见窗口。
     log("启动 Qianwen Worker（认领模式，无全局锁）")
     log("打开浏览器...")
     with sync_playwright() as p:
@@ -800,6 +906,8 @@ def main():
 
         ready(page)
 
+        # run_worker_loop 是 worker_lib.py 提供的公共循环：反复认领单元 -> handle_unit
+        # 处理 -> 回调 -> 再认领，认领/心跳/回调的并发安全都在后端。
         log("开始从任务池认领单元...")
         try:
             run_worker_loop("qianwen", page, handle_unit)

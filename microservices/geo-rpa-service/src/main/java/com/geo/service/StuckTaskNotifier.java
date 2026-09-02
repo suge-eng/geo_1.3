@@ -34,12 +34,15 @@ public class StuckTaskNotifier {
     private final TaskResultMapper taskResultMapper;
     private final JavaMailSender mailSender;
 
+    /** 总开关：默认关闭，避免误发邮件打扰用户，直到显式配置 geo.rpa.notify.enabled=true 才启用。 */
     @Value("${geo.rpa.notify.enabled:false}")
     private boolean enabled;
 
+    /** 判定阈值：单元持续 RUNNING 超过该分钟数仍未完成即视为「卡住」。 */
     @Value("${geo.rpa.notify.stuck-minutes:5}")
     private long stuckMinutes;
 
+    /** 通知收件人列表，可配置多个邮箱；未配置时跳过通知并告警日志。 */
     @Value("${geo.rpa.notify.to:}")
     private List<String> to;
 
@@ -48,6 +51,10 @@ public class StuckTaskNotifier {
         this.mailSender = mailSender;
     }
 
+    /**
+     * 定时巡检（默认每 60 秒）：查出所有 RUNNING 超时仍未完成的单元，汇总成一封邮件发出。
+     * 邮件发送成功后立即把这些单元标记为「已通知」，避免下一轮重复骚扰用户。
+     */
     @Scheduled(fixedDelayString = "${geo.rpa.notify.scan-ms:60000}",
             initialDelayString = "20000")
     @Transactional
@@ -77,6 +84,7 @@ public class StuckTaskNotifier {
             mailSender.send(buildMessage(stuckUnits));
             log.warn("发现 {} 个卡住单元，已发送邮件通知，收件人={}", stuckUnits.size(), to);
             for (TaskResult unit : stuckUnits) {
+                // 标记已通知，下一轮巡检不会再选到这些单元，实现「一次卡住只提醒一次」。
                 taskResultMapper.markStuckNotified(unit.getId());
             }
         } catch (Exception e) {
@@ -84,6 +92,10 @@ public class StuckTaskNotifier {
         }
     }
 
+    /**
+     * 组装通知邮件正文：把一批卡住单元的「单元ID / 任务号 / 平台 / 机器 / 开始时间 / 问题」逐条列出，
+     * 方便用户快速定位是哪台电脑、哪个问题卡住，并有针对性地人工处理（如过验证码）。
+     */
     private SimpleMailMessage buildMessage(List<TaskResult> units) {
         StringBuilder sb = new StringBuilder();
         sb.append("您好，以下 ").append(units.size()).append(" 个任务单元疑似在 AI 平台上卡住（可能弹了验证码），")
@@ -106,6 +118,9 @@ public class StuckTaskNotifier {
         return message;
     }
 
+    /**
+     * 截断超长文本，避免邮件事无巨细地塞进整段问题导致正文过长、难以阅读。
+     */
     private String truncate(String s, int n) {
         if (s == null) {
             return "-";

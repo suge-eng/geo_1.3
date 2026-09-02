@@ -1,3 +1,28 @@
+"""
+yuanbao.py —— 腾讯元宝（Yuanbao / 混元）平台的 RPA 自动化脚本，系统「工人」之一。
+
+一、角色与整体流程（与 deepseek.py / kimi.py / qianwen.py / doubao.py 一致）
+--------------------------------------------------------------------------
+用 Playwright 驱动本机 Edge 登录元宝网页版，从后端「任务池」认领「1 问题 ×
+1 元宝」的最小单元，让 AI 深度思考回答、截图、回调。并发安全由后端（租约 + 原子
+认领）保证，脚本无全局锁，可多机并行。
+
+二、元宝平台特有的难点（本脚本最值得学习的设计）
+------------------------------------------------
+1. 深度思考是「对话级开关」：enable_deep_thinking() 通过 dt-button-id="deep_think"
+   按钮开启深度思考，是否开启靠 class 里含 ThinkSelector_selected 判定；开启后必须
+   校验真的生效，否则后续取不到思考内容。
+2. 回答完成判定靠 convStatus：每条 AI 消息的 DOM 上有 data-conv-status / data-conv-
+   outputting 属性，finished + 不再 outputting 即完成（见 ai_messages 的 done 字段）。
+3. 思考与回答分离：思考在 .hyc-component-deepsearch-cot 里，回答正文在 .hyc-content-md，
+   message_data() 用这两个选择器分别抽取，并判断思考是否展开过。
+4. 引用来源要二次校验：extract_sources() 先点引用按钮打开列表，等卡片加载稳定后再用
+   注入 JS 从 #chatReferenceList 里抓 url+标题；若打开了引用却没读到内容会主动抛错，
+   保证"宁失败不错报"。
+5. 截图用「克隆 DOM + 左右分栏」：take_screenshot() 把问题+回答克隆到左侧、来源列表
+   克隆到右侧，拼成一整张图，绕开长回答截断。
+"""
+
 import json
 import os
 import random
@@ -26,15 +51,18 @@ SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 
 def log(msg):
+    # 带时间戳打印，flush=True 实时刷控制台。
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {msg}", flush=True)
 
 
 def human_wait(a=1, b=3):
+    # 随机等待，模拟真人节奏、降低反爬识别。
     time.sleep(random.randint(a, b))
 
 
 def first_visible(locator):
+    # 返回集合里第一个可见元素。
     for i in range(locator.count()):
         item = locator.nth(i)
         if item.is_visible():
@@ -43,16 +71,20 @@ def first_visible(locator):
 
 
 def input_box(page):
+    # 元宝输入框是 .ql-editor 富文本编辑器（Quill），contenteditable=true。取 .last 兜底。
     box = page.locator('.ql-editor[contenteditable="true"]').last
     box.wait_for(state="visible", timeout=30000)
     return box
 
 
 def login_entry(page):
+    # 用正则匹配"登录/登录注册"入口文本，稳健应对文案微调。
     return first_visible(page.get_by_text(re.compile(r"^\s*(登录|登录/注册)\s*$")))
 
 
 def ensure_login(page):
+    # 登录态检测 + 人工兜底（和 kimi.py 完全同构）：已登录直接返回，否则点登录入口
+    # 后阻塞等用户在浏览器里手动登录（扫码/验证码交给人才最稳）。
     page.wait_for_timeout(1000)
     login = login_entry(page)
     if login is None:
@@ -77,6 +109,8 @@ def ensure_login(page):
 
 
 def ready(page):
+    # 就绪判断：反复试探输入框是否可点击（trial=True 不产生真实点击副作用），
+    # 600 秒内没就绪就抛超时。
     end = time.time() + 600
     while time.time() < end:
         try:
@@ -90,12 +124,15 @@ def ready(page):
 
 
 def new_chat(page):
+    # 跳转对话 URL（代码里写死了一个会话入口）-> 确保登录 -> 返回就绪的输入框。
     page.goto(URL, wait_until="domcontentloaded", timeout=60000)
     ensure_login(page)
     return ready(page)
 
 
 def enable_deep_thinking(page):
+    # 开启深度思考。靠 class 里含 ThinkSelector_selected 判断是否已开；没开则点按钮，
+    # 点完再校验，防止"点了没生效"。元宝深度思考是发问前必须开好的，否则拿不到思考。
     button = page.locator('[dt-button-id="deep_think"][aria-label="深度思考"]').last
     button.wait_for(state="visible", timeout=20000)
     if "ThinkSelector_selected" in (button.get_attribute("class") or ""):
@@ -109,6 +146,9 @@ def enable_deep_thinking(page):
 
 
 def ai_messages(page):
+    # 列出页面里所有 AI 回答节点的 id 与「是否完成」。
+    # 完成判定直接读 DOM 上的 data-conv-status="finished" 且 data-conv-outputting="false"，
+    # 这是元宝给每条会话提供的状态字段，比其它平台靠启发式判断更可靠。
     return page.evaluate("""() => [...document.querySelectorAll(
       '.agent-chat__list__item--ai[data-conv-id]')].map(x => ({
         id:x.dataset.convId || '', done:x.dataset.convStatus === 'finished' &&
@@ -117,6 +157,9 @@ def ai_messages(page):
 
 
 def message_data(page, conv_id):
+    # 从某条回答的 DOM 里提取思考、回答正文、完成状态（注入 JS，原因同 kimi/qianwen）。
+    # 元宝的思考在 .hyc-component-deepsearch-cot，回答在 .hyc-content-md，二者天然分离，
+    # 所以抽取比千问简单。同时返回 thinkingText（纯文本）供 wait_answer 做内容长度判断。
     return page.evaluate("""id => {
       const cleanText=s=>(s||'').replace(/\\r/g,'').replace(/\\n[ \\t]+/g,'\\n').trim();
       const cleanHtml = (el) => {
@@ -160,6 +203,9 @@ def message_data(page, conv_id):
 
 
 def wait_answer(page, old_ids):
+    # 等待回答生成完成。
+    # 思路：找出新出现（不在 old_ids）的回答，取思考+回答拼接文本；完成条件是
+    # done=true，或文本连续 30 秒不变（stable>=30）。720 秒兜底超时。
     end, last, stable = time.time() + 720, "", 0
     while time.time() < end:
         fresh = [x for x in ai_messages(page) if x["id"] and x["id"] not in old_ids]
@@ -176,6 +222,8 @@ def wait_answer(page, old_ids):
 
 
 def expand_thinking(page, conv_id):
+    # 展开回答里折叠的思考区。元宝思考默认收起，header 点击展开后 class 会带上
+    # --expand 后缀；这里判断若还没展开就点一下 title/header 展开。
     expanded = page.evaluate("""id => {
       const root=[...document.querySelectorAll('.agent-chat__list__item--ai[data-conv-id]')]
         .find(x=>x.dataset.convId===id);
@@ -190,6 +238,10 @@ def expand_thinking(page, conv_id):
 
 
 def extract_sources(page, conv_id):
+    # 提取回答引用的"引用来源"网址。
+    # 流程：先定位回答里的引用按钮（data-toolbar-type="citation"），若有则点开引用列表，
+    # 等卡片数量稳定（连续 3 轮不变）后用注入 JS 从 #chatReferenceList 抓 url+标题；
+    # 若确实打开了引用却一条都没读到，主动抛错（宁失败不错报），让上层知道取源出了问题。
     root = page.locator(f'.agent-chat__list__item--ai[data-conv-id="{conv_id}"]')
     citation = root.locator('[data-toolbar-type="citation"]')
     has_citation = citation.count() and citation.last.is_visible()
@@ -227,6 +279,10 @@ def extract_sources(page, conv_id):
 
 
 def ask(page, question):
+    # 发起一次提问并等待回答，返回结构化结果（含 id/thinking/answer/sources）。
+    # 流程：新建对话 -> 开启深度思考 -> 记录发送前已有回答 id -> 填问题 -> 点发送
+    # -> 等完成 -> 展开思考 -> 重新取数据 -> 校验思考确实有内容 -> 提取来源。
+    # 特别地：开启深度思考后若没拿到思考内容会直接抛错，保证"要思考就一定拿到思考"。
     box = new_chat(page)
     enable_deep_thinking(page)
     old_ids = {x["id"] for x in ai_messages(page)}
@@ -264,6 +320,8 @@ def safe_name(s):
 
 
 def take_screenshot(page, conv_id, question, save_path):
+    # 截图，采用「克隆 DOM + 左右分栏」方案：左侧克隆问题+回答，右侧克隆引用来源列表，
+    # 拼进 #yuanbao-shot 容器再截图，得到既完整又干净的图；失败退回整页截图兜底。
     try:
         page.evaluate("""arg => {
           document.querySelector('#yuanbao-shot')?.remove();
@@ -307,7 +365,14 @@ def take_screenshot(page, conv_id, question, save_path):
 
 
 def handle_unit(page, unit):
-    """处理单个任务单元（1 问题 x 1 Yuanbao = 1 条 task_result）。由 worker 循环调用。"""
+    """处理单个任务单元（1 问题 x 1 Yuanbao = 1 条 task_result）。由 worker 循环调用。
+
+    流程：ask() 提问取结果 -> take_screenshot() 截图 -> 上传截图 -> worker_callback()
+    回调结果。
+
+    异常处理设计（重要）：无论成功失败都必须回调一次置终态（SUCCESS/FAILED），否则后端
+    只能等租约超时才回收单元。try 走 SUCCESS，except 走 FAILED。
+    """
     task_no = str(unit.get("taskNo"))
     agent_name = unit.get("aiPlatform") or "tencent"
     question = str(unit.get("questionText") or "")
@@ -368,6 +433,10 @@ def handle_unit(page, unit):
 
 
 def main():
+    # 入口：启动浏览器 -> 登录 -> 进入认领循环。细节同其它平台脚本：
+    # launch_persistent_context 持久化登录态；--disable-blink-features=AutomationControlled
+    # 隐藏自动化特征；run_worker_loop 是 worker_lib 提供的认领主循环（认领/心跳/回调
+    # 的并发安全都在后端）。
     log("启动 Yuanbao Worker（认领模式，无全局锁）")
     log("打开浏览器...")
     with sync_playwright() as p:
@@ -397,6 +466,7 @@ def main():
             browser.close()
             return
 
+        # run_worker_loop 会反复认领单元并调用 handle_unit 处理。
         log("开始从任务池认领单元...")
         try:
             run_worker_loop("tencent", page, handle_unit)

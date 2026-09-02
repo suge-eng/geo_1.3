@@ -10,6 +10,12 @@ import org.springframework.context.annotation.Configuration;
 
 import java.time.LocalDateTime;
 
+/**
+ * MyBatis-Plus 配置：
+ *   - 注册分页插件（MySQL 方言），支撑看板、任务列表的分页查询；
+ *   - 提供字段自动填充：createdAt/updatedAt 在插入、更新时自动写入当前时间，
+ *     让业务代码专注于业务字段，无需手工维护审计时间。
+ */
 @Configuration
 public class MybatisPlusConfig {
 

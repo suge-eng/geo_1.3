@@ -1,3 +1,30 @@
+"""
+kimi.py —— Kimi 平台的 RPA 自动化脚本，系统「工人」之一。
+
+一、角色与整体流程（和 deepseek.py / doubao.py 完全一致）
+--------------------------------------------------------
+本脚本不是后端服务，而是一个跑在 Windows 机器上的 Python 进程：用 Playwright
+驱动本机 Edge 浏览器登录 Kimi 网页版，然后不断从后端「任务池」认领「1 问题 ×
+1 Kimi」的最小工作单元，让 AI 回答、截图、回调结果。核心是一个 run_worker_loop()
+死循环：认领单元 -> handle_unit() 处理 -> 回调 -> 再认领下一个。
+
+并发安全的保证全部在后端（租约 + 原子认领），本脚本不持有任何全局锁，所以多台
+电脑跑同一个脚本也不会互相抢。
+
+二、Kimi 平台特有的难点（也是本脚本最值得学习的设计）
+------------------------------------------------------
+1. 思考流程非一次性展开：Kimi 的「思考」是折叠的卡片，要先 detect 到思考区域再
+   逐个点击展开（见 expand()），否则截图/提取会拿不到思考内容。
+2. 回答「完成」判定难：Kimi 没有明显的「生成完成」标志，wait_answer() 用了一套
+   「内容 + 停止按钮 + 操作栏 + 连续 N 秒不变」的启发式组合来判定生成结束，避免
+   提前回调或永等。
+3. 来源列表在侧边栏：extract_sources() 需要先点击「搜索网页」卡片，再在侧边栏
+   （side-console-rail）里滚动拉取全部来源链接，并靠「滚动到底且连续几轮没新增」
+   来判断已拉完。
+4. 虚拟滚动 / 版式限制：shot() 同样用「克隆 DOM 到独立容器」的方式，保证长回答能
+   截全，同时把「问题 + 回答 + 来源」拼成一整张干净的图。
+"""
+
 import json
 import os
 import random
@@ -22,19 +49,26 @@ PLATFORM_NAME = "kimi"
 
 URL = "https://www.kimi.com/?chat_enter_method=new_chat"
 
-SCREENSHOT_DIR.mkdir(exist_ok=True)
-
+# ============================ 基础工具函数 ============================
+# 下面这几个都是「原子小工具」，被上面的大流程反复调用。拆成小函数的目的是
+# 减少重复代码、让每个函数只做一件事（单一职责），后面维护/调试时更好定位问题。
 
 def log(msg):
+    # 带时间戳的打印。flush=True 让日志立刻刷到控制台，不会被缓冲卡住，
+    # 这样在 PowerShell 里实时看进度时不会「半天没输出」。
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {msg}", flush=True)
 
 
 def human_wait(a=1, b=3):
+    # 随机等待 a~b 秒，模拟真人操作节奏，降低被 AI 平台反爬识别的概率。
     time.sleep(random.randint(a, b))
 
 
 def first_visible(locator):
+    # 从一个 Locator 集合里返回第一个「真正可见」的元素。
+    # 设计原因：网页里经常有多个同名元素（比如好几个"登录"按钮），
+    # 有的隐藏有的可见，只有可见的那个才是用户能点的。
     for i in range(locator.count()):
         item = locator.nth(i)
         if item.is_visible():
@@ -42,17 +76,28 @@ def first_visible(locator):
     return None
 
 
+# ============================ 登录 / 就绪判断 ============================
+# 思路：不主动强制登录，而是「检测是否已登录 -> 没有就点击登录入口并在浏览器里等
+# 人工完成登录 -> 登录态持久化到本地 edge_kimi_profile 目录，下次免登录」。
+
 def input_box(page):
+    # Kimi 的输入框是一个 contenteditable 的富文本编辑器，不是普通 <textarea>。
+    # 取 .last 的原因是页面上可能有多个编辑器节点，最后一个才是真正在用的。
     box = page.locator('.chat-input-editor[contenteditable="true"]').last
     box.wait_for(state="visible", timeout=30000)
     return box
 
 
 def login_entry(page):
+    # 用正则匹配「登录」或「登录/注册」这类入口文字。
+    # 注意用 get_by_text + 正则，是应对入口文案可能微调（多一个词、多空格）的稳健写法。
     return first_visible(page.get_by_text(re.compile(r"^\s*(登录|登录/注册)\s*$")))
 
 
 def ensure_login(page):
+    # 登录态检测 + 人工兜底。若已登录（找不到"登录"入口）则直接返回；
+    # 否则点击登录入口后，阻塞式等待用户在浏览器里手动扫码/输入完成登录。
+    # 为什么等人工：登录通常涉及扫码/验证码，脚本自己无法可靠完成，交给人才最稳。
     page.wait_for_timeout(1000)
     login = login_entry(page)
     if login is None:
@@ -64,6 +109,7 @@ def ensure_login(page):
     log("请在打开的 Edge 窗口中完成 Kimi 登录，脚本正在等待……")
     end = time.time() + 600
     while time.time() < end:
+        # 登录成功的标志：登录入口消失，且能点到输入框。
         if login_entry(page) is None:
             try:
                 input_box(page).click(trial=True, timeout=2000)
@@ -76,6 +122,9 @@ def ensure_login(page):
 
 
 def ready(page):
+    # 阻塞到「输入框可点击」为止，作为页面彻底就绪的信号。
+    # 用 click(trial=True) 是 Playwright 的「试探性点击」：只检查能否点到、不真正触发点击，
+    # 用来判断元素是否已经可交互，又不产生副作用，非常合适做就绪探测。
     while True:
         try:
             box = input_box(page)
@@ -87,6 +136,8 @@ def ready(page):
 
 
 def messages(page):
+    # 拿到页面里所有 AI 回答节点的 id 列表（data-archer-id 是 Kimi 给每条回答的唯一标识）。
+    # 后续靠「对比 old_ids 找出新出现的 id」来定位本次刚生成的回答。
     value = page.evaluate("""() => [...document.querySelectorAll(
       '.chat-content-item-assistant[data-archer-id]')].map(x => ({
         id:x.getAttribute('data-archer-id') || ''
@@ -95,6 +146,20 @@ def messages(page):
 
 
 def message_data(page, message_id):
+    # 这是本脚本最核心的「内容提取器」：注入一段 JS，从某条回答的 DOM 里抽出
+    # 回答正文、思考内容、思考标题、是否生成中、操作栏是否就绪等结构化信息。
+    #
+    # 为什么要把提取逻辑写成注入的 JS，而不是用 Playwright 的 Python API 逐个元素取？
+    # 因为「回答正文」是 Markdown 渲染后的富文本，要干净地拿到内容、剔除按钮/脚本/
+    # 样式等噪音、判断思考是否完成，这些在页面 JS 上下文里用 querySelector 一次做完
+    # 又快又稳；用 Python 逐段 locator 会非常啰嗦且容易受版式变化影响。
+    #
+    # 返回值各字段含义：
+    #   answer     : 剥离样式后的回答正文 HTML（多段用 \n\n 拼接）
+    #   thinking   : 思考内容 HTML（多个思考卡片用 <hr> 分隔）
+    #   thinkTitle : 思考卡片标题（用于判断思考是否完成）
+    #   generating : 是否仍在生成（检测"停止生成"按钮是否存在）
+    #   actionsReady: 底部操作栏（复制/点赞等）是否出现，作为回答已落定的辅助信号
     return page.evaluate(r"""id => {
       const clean=s=>(s||'').replace(/\r/g,'').replace(/\n[ \t]+/g,'\n').trim();
       const visible=e=>{
@@ -166,6 +231,15 @@ def message_data(page, message_id):
 
 
 def wait_answer(page, old_ids):
+    # 等待本次提问的回答生成完成。
+    #
+    # 核心思路：Kimi 没有显式的"生成完成"信号，所以用「多重信号 + 稳定判定」组合：
+    #   1. 先找出新出现（不在 old_ids 里）的回答节点，锁定本次回答的 id；
+    #   2. 对每条回答计算一个 signature（回答+思考+标题的拼接），连续 5 秒 signature
+    #      都不变，说明内容已稳定（stable 计数）；
+    #   3. 同时要求：回答有内容、没有"停止生成"按钮、操作栏已就绪——三者都满足才算完。
+    #   4. 判定完成后，再等 1.5 秒二次复核，防止"刚好卡在稳定点"的误判。
+    # 这个「稳定 N 秒 + 多条件」的写法是处理前端流式输出的通用套路。
     end, last, stable, last_log = time.time() + 600, "", 0, 0
     data, last_error = {}, ""
     while time.time() < end:
@@ -209,6 +283,9 @@ def wait_answer(page, old_ids):
 
 
 def expand(page, message_id):
+    # 展开某条回答里所有折叠的「思考」卡片。
+    # Kimi 的思考默认是收起状态（is-expanded 标记未加），不点开就拿不到思考正文。
+    # 这里一次性把该回答下所有未展开的 thinking-container 逐一点开。
     clicked = page.evaluate("""id => {
       const root=[...document.querySelectorAll(
         '.chat-content-item-assistant[data-archer-id]')]
@@ -226,6 +303,11 @@ def expand(page, message_id):
 
 
 def extract_sources(page, message_id):
+    # 提取回答引用的「搜索网页来源」。Kimi 的来源藏在侧边栏（.side-console-rail）。
+    #
+    # 流程：点击该回答里的"搜索网页"卡片打开侧边栏 -> 在侧边栏里不断向下滚动，边滚边
+    # 抓 a.site[href] 链接（用 dict 按 url 去重）-> 当「滚动到底且连续 3 轮没新增链接」
+    # 时停止。这个"滚到底 + 无新增"的终止条件是滚动加载类列表的通用判别法。
     opened = page.evaluate("""id => {
       const root=[...document.querySelectorAll(
         '.chat-content-item-assistant[data-archer-id]')]
@@ -300,6 +382,12 @@ def safe_name(s):
 
 
 def shot(page, message_id, save_path, question="", sources=None):
+    # 给某个回答截图，采用「克隆 DOM 到独立容器再截图」的方案（和 doubao.py 同理）。
+    #
+    # 设计原因：Kimi 聊天页存在高度限制/虚拟滚动，直接整页截图有可能截不全长回答，
+    # 也截不到右侧来源侧边栏。这里注入 JS，把「问题 + 回答（cloneNode 复制）+ 来源列表」
+    # 拼进一个绝对定位、白底、强制展开所有折叠样式的容器 #kimi-shot 里，只对这个容器
+    # 截图，得到既完整又干净的图。失败则退回整页截图兜底。
     sources = sources or []
     try:
         page.evaluate("""arg => {
@@ -361,6 +449,11 @@ def shot(page, message_id, save_path, question="", sources=None):
 
 
 def ask(page, question):
+    # 发起一次提问并等待回答完成，返回结构化结果（含 id、answer、thinking 等）。
+    #
+    # 带 2 次重试：第 1 次若因 RuntimeError（比如中途弹验证码导致提取失败）失败，
+    # 会调用 ready() 阻塞等人工处理，等待 20 秒后用新对话再试一次；第 2 次再失败就抛。
+    # 这样设计是为了「偶发的验证码/页面抖动」不至于让整个单元直接失败，多一次机会。
     for attempt in range(2):
         try:
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
@@ -392,7 +485,18 @@ def ask(page, question):
 
 
 def handle_unit(page, unit):
-    """处理单个任务单元（1 问题 x 1 Kimi = 1 条 task_result）。由 worker 循环调用。"""
+    """处理单个任务单元（1 问题 x 1 Kimi = 1 条 task_result）。由 worker 循环调用。
+
+    unit 是后端任务池派发来的最小工作项，含 taskNo / aiPlatform / questionText 等字段。
+
+    流程：ask() 提问取结果 -> extract_sources() 拉来源 -> shot() 截图 -> 上传截图 ->
+    worker_callback() 把结果回传给后端。
+
+    异常处理设计（很重要）：
+      无论成功失败，最终必须回调一次，把单元置为终态（SUCCESS / FAILED）。否则后端
+      只能等租约超时才回收这个单元，白白多等。所以 try 里成功走 SUCCESS 回调，
+      except 里兜底走 FAILED 回调——保证「每个认领到的单元一定有结局」。
+    """
     task_no = str(unit.get("taskNo"))
     agent_name = unit.get("aiPlatform") or "kimi"
     question = str(unit.get("questionText") or "")
@@ -451,6 +555,12 @@ def handle_unit(page, unit):
 
 
 def main():
+    # 程序入口：启动浏览器 -> 登录 -> 进入认领循环。
+    #
+    # launch_persistent_context 用 user_data_dir 指定一个本地目录持久化登录态，
+    # 这样第一次登录后，之后重启脚本都不用再登录（除非登录态过期）。
+    # 启动参数里 --disable-blink-features=AutomationControlled 是为了隐藏"我是自动化"
+    # 的特征、降低被反爬识别的概率；headless=False 表示要有可见窗口。
     log("启动 Kimi Worker（认领模式，无全局锁）")
     log("打开浏览器...")
     with sync_playwright() as p:
@@ -478,6 +588,8 @@ def main():
         ready(page)
         log("已登录")
 
+        # run_worker_loop 是 worker_lib.py 提供的公共主循环：反复「认领一个单元 ->
+        # 调 handle_unit 处理 -> 回调 -> 再认领」。认领/心跳/回调的并发安全都在后端。
         log("开始从任务池认领单元...")
         try:
             run_worker_loop(PLATFORM_NAME, page, handle_unit)

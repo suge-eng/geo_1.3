@@ -49,3 +49,16 @@ bin/
 
 # Application config (if contains secrets)
 # application-local.yml
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Selenium / Edge profiles (runtime data)
+edge_*_profile/
+edge_profile/
+
+# Screenshots (runtime output)
+*_screenshots/
+screenshots/
