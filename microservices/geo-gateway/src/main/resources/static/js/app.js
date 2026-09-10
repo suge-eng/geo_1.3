@@ -944,6 +944,43 @@ const __geoApp = createApp({
             this.showToast(`已导出 ${selectedResults.length} 个询问句`, 'success')
         },
 
+        // 把 HTML 字符串里的标签全部剥掉，只留纯文本
+        // 用浏览器原生 DOMParser 解析后取 textContent，比正则稳得多（不会误杀 < 等字符）
+        stripHtml(html) {
+            if (!html) return ''
+            const doc = new DOMParser().parseFromString(html, 'text/html')
+            return doc.body.textContent || doc.body.innerText || ''
+        },
+
+        // 导出问答内容为 CSV 文件：只导出 问题 + 思考内容 + 回答内容（纯文本，剥掉 HTML 标签）
+        exportQaContent() {
+            const selectedResults = this.selectedTaskResults
+            if (selectedResults.length === 0) {
+                this.showToast('请先勾选需要导出的询问句', 'error')
+                return
+            }
+            const csvEscape = value => `"${String(value ?? '').replace(/"/g, '""')}"`
+            const headers = ['问题', '思考内容', '回答内容']
+            const rows = selectedResults.map(result => [
+                this.stripHtml(result.questionText),
+                this.stripHtml(result.thinkingContent),
+                this.stripHtml(result.answerText)
+            ])
+            const csvContent = '\uFEFF' + [headers, ...rows]
+                .map(row => row.map(csvEscape).join(','))
+                .join('\n')
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' })
+            const url = URL.createObjectURL(blob)
+            const link = document.createElement('a')
+            link.href = url
+            link.download = `${this.selectedTask?.title || '观测任务'}-问答内容.csv`
+            document.body.appendChild(link)
+            link.click()
+            document.body.removeChild(link)
+            URL.revokeObjectURL(url)
+            this.showToast(`已导出 ${selectedResults.length} 个问答`, 'success')
+        },
+
         async copyDetailLink() {
             try {
                 await navigator.clipboard.writeText(window.location.href)

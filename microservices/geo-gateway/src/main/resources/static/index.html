@@ -387,6 +387,7 @@
                 <button class="detail-query-button">查询</button>
                 <div class="detail-toolbar-actions">
                     <button @click="exportDetailCsv(false)">导出详情</button>
+                    <button @click="exportQaContent">导出问答</button>
                     <button @click="exportDetailCsv(true)">导出联网记录</button>
                     <button @click="retryAllTasks">重新执行</button>
                     <button @click="batchDeleteResults" :disabled="selectedResultIds.length === 0" class="btn-danger">删除选中</button>

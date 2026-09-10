@@ -2,14 +2,14 @@
 server:
   address: 0.0.0.0            # 监听所有网卡
   port: 8082                  # 本服务端口（分析服务固定 8082）
-  connection-timeout: 600s    # 连接建立超时：10 分钟
+  # connection-timeout: 600s    # 连接建立超时：10 分钟
   forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头
   tomcat:
     keep-alive-timeout: 600s  # 单连接空闲保持时间
     max-keep-alive-requests: -1  # 连接复用次数，-1 不限
-    max-threads: 200          # 工作线程上限
+    max-threads: 200         # 工作线程上限
     accept-count: 1000        # 满载等待队列长度
-
+    connection-timeout: 600s    # # 连接建立超时：10 分钟
 # ===== Spring 应用基础配置 =====
 spring:
   application:
