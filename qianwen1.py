@@ -1,62 +1,98 @@
-"""
-qianwen.py —— 千问（Qwen）平台的 RPA 自动化脚本，系统「工人」之一。
-
-一、角色与整体流程（和 deepseek.py / kimi.py / doubao.py 一致）
---------------------------------------------------------------
-用 Playwright 驱动本机 Edge 登录千问网页版，不断从后端「任务池」认领「1 问题 ×
-1 千问」的最小单元，让 AI 回答、截图、回调。主循环 run_worker_loop() 里的并发安全
-全部由后端（租约 + 原子认领）保证，脚本自身无全局锁，可多机并行。
-
-二、千问平台特有的难点（本脚本最值得学习的设计）
-------------------------------------------------
-1. 思考模式要手动切换：千问默认可能是「快速回答」模式，需要先把模型切到「思考研究」
-   模式（enable_thinking()），才能拿到深度思考内容；切换入口是页面里的下拉菜单。
-2. 回答完成判定靠「完成锚点」：wait_for_answer() 用 id 前缀 multi-message-card-
-   finish-anchor-* 的出现 + 底部反馈工具条 + 文本 2 秒不变来判定生成结束。
-3. 思考/正文混在消息流里：千问把搜索步骤、思考、正文按时间顺序铺成一张卡片流，
-   extract_thinking()/extract_answer() 用大段注入 JS 做启发式分离（去重、按位置
-   归类、剥离样式）。
-4. 长截图用「临时放大视口」方案：capture_screenshot() 不是克隆 DOM，而是先量出内容
-   高度，然后临时把浏览器视口拉高到这个高度再 clip 截图：这样真实还原滚动列表的
-   「问题+思考+答案+来源」完整长图。
-"""
-
 import json
 import os
 import random
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 
+import pika
+import requests
 from playwright.sync_api import sync_playwright
-
-from worker_lib import (
-    upload_screenshot as worker_upload,
-    run_worker_loop,
-    callback as worker_callback,
-)
 
 BASE_DIR = Path(__file__).resolve().parent
 SCREENSHOT_DIR = BASE_DIR / "qianwen_screenshots"
 PROFILE = BASE_DIR / "edge_qianwen_profile"
+LOCK_DB = BASE_DIR / "_global_lock.db"
 
-PLATFORM_NAME = "qianwen"
+PLATFORM_NAME = "qwen"
+LOCK_TIMEOUT = 43200
+LOCK_POLL_INTERVAL = 10
+LOCK_EXPIRE_SECONDS = 1800
+HEARTBEAT_INTERVAL = 60
+
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5673))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "geo")
+RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "geo123")
+RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "geo.rpa.task.queue")
+
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8080")
 
 QWEN_URL = "https://www.qianwen.com/chat"
 
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 
-# ============================ 基础工具 ============================
 def log(msg):
-    # 带时间戳打印，flush=True 保证日志实时刷到控制台（避免缓冲导致"半天没输出"）。
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {msg}", flush=True)
 
 
+def callback_backend(task_id, agent_name, question_content, thinking_content,
+                     answer_content, source_info, image_url, status, error_msg=None):
+    try:
+        callback_url = BACKEND_BASE_URL + "/api/rpa/callback"
+        payload = {
+            "taskNo": str(task_id),
+            "aiPlatform": str(agent_name),
+            "questionText": str(question_content),
+            "thinkingContent": str(thinking_content),
+            "answerText": str(answer_content),
+            "sourceInfo": str(source_info),
+            "screenshotUrls": [image_url] if image_url else [],
+            "status": status,
+            "errorMsg": error_msg,
+            "durationMs": 0
+        }
+        log(f"回调后端: {callback_url}")
+        log(json.dumps(payload, ensure_ascii=False, indent=2))
+        response = requests.post(
+            callback_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        if response.status_code == 200:
+            log("回调成功")
+        else:
+            log(f"回调失败: {response.text}")
+    except Exception as e:
+        log(f"回调异常: {e}")
+
+
+def upload_screenshot(local_path, task_id):
+    try:
+        upload_url = BACKEND_BASE_URL + "/api/rpa/upload"
+        log(f"上传截图: {local_path}")
+        with open(local_path, "rb") as f:
+            files = {"file": (os.path.basename(local_path), f, "image/png")}
+            data = {"taskId": task_id}
+            response = requests.post(upload_url, files=files, data=data, timeout=60)
+        if response.status_code == 200:
+            result_data = response.json()
+            if result_data.get("code") == 200 or result_data.get("success") is True:
+                return result_data.get("data") or result_data.get("url")
+            elif "data" in result_data:
+                return result_data.get("data")
+        log(f"上传失败: {response.text}")
+        return None
+    except Exception as e:
+        log(f"上传异常: {e}")
+        return None
+
+
 def visible(locator):
-    # 安全判断某个 Locator 是否「存在且可见」，任何异常都当作不可见处理。
-    # 因为 AI 平台页面经常动态渲染/重排，元素可能瞬间消失，这里必须容错。
     try:
         return locator.count() > 0 and locator.is_visible()
     except Exception:
@@ -64,8 +100,6 @@ def visible(locator):
 
 
 def input_box(page):
-    # 千问输入框是 Slate 富文本编辑器（contenteditable + [role=textbox]），不是普通 textarea。
-    # 用这一长串选择器精准锁定；取 .last 是因为页面可能残留多个编辑器节点。
     locator = page.locator(
         '[data-chat-input-body="true"] '
         '[role="textbox"][contenteditable="true"][data-slate-editor="true"]'
@@ -76,8 +110,6 @@ def input_box(page):
 
 
 def wait_for_login(page):
-    # 在 300 秒内轮询等待登录后的输入框出现。轮询而非一次性 wait 的目的：
-    # 登录过程可能经历跳转/重渲染，输入框不会立刻出现，需要反复探测。
     log("等待登录后的输入框")
     deadline = time.time() + 300
     while time.time() < deadline:
@@ -89,8 +121,6 @@ def wait_for_login(page):
 
 
 def ready(page):
-    # 就绪判断：先尝试自动等待登录完成；若超时则进入「人工兜底」——在控制台阻塞等
-    # 用户手动登录后按 Enter，再继续。这对应"遇到登录/验证码时把决定权交回给人"的思路。
     log("等待千问登录...")
     try:
         wait_for_login(page)
@@ -109,8 +139,6 @@ def ready(page):
 
 
 def new_chat(page):
-    # 新建一个对话并返回输入框。优先点「新建对话」按钮（能清空上下文、避免上一次
-    # 会话内容串味）；没有按钮就直接跳转千问首页。然后等待输入框出现。
     buttons = page.get_by_role("button", name="新建对话", exact=True)
     if buttons.count() > 0 and buttons.first.is_visible():
         buttons.first.click()
@@ -128,14 +156,6 @@ def new_chat(page):
 
 
 def enable_thinking(page):
-    # 把千问模型切到「思考研究」模式，才能拿到深度思考内容。
-    #
-    # 为什么这里这么复杂？千问的思考模式入口不固定，可能是一个 aria-haspopup 下拉
-    # 按钮（"快速功能/思考研究"），也可能直接是一个"思考"文字按钮。所以函数里写了
-    # 两段探测：
-    #   第一段：遍历所有下拉按钮，找到带"快速"或"思考研究"文案的，点开后勾选"思考研究"项；
-    #   第二段（兜底）：找不到下拉就去找"思考"文字直接点一下。
-    # 这种「多路径探测 + 逐条 try」的写法，是为了兼容千问改版后入口变化的场景。
     dropdowns = page.locator('button[aria-haspopup="menu"]')
     for index in range(dropdowns.count() - 1, -1, -1):
         button = dropdowns.nth(index)
@@ -176,12 +196,6 @@ def enable_thinking(page):
 
 
 def send_question(page, question):
-    # 填写问题并发送。
-    # 反检测要点：
-    #   1. 先模拟真人鼠标移动到输入框再点击，而不是直接 force click；
-    #   2. 用 type(逐字键入+随机延时) 代替 fill(瞬间填充)，fill 会被输入法/编辑事件
-    #      检测识破——真人不可能 0 毫秒敲完一整段话；
-    #   3. 键入后随机停顿，再点发送按钮。
     box = input_box(page)
     if box is None:
         raise RuntimeError("找不到输入框")
@@ -203,8 +217,6 @@ def send_question(page, question):
 
 
 def visible_answer(page):
-    # 返回当前页面里最后一条可见的「回答卡片」。倒序遍历是因为回答通常追加在最后，
-    # 从后往前找能最快定位到最新一条。
     answers = page.locator(".answer-common-card")
     for index in range(answers.count() - 1, -1, -1):
         answer = answers.nth(index)
@@ -214,14 +226,6 @@ def visible_answer(page):
 
 
 def wait_for_answer(page, timeout_minutes=20):
-    # 等待回答生成完成。
-    #
-    # 完成判定的三个条件（都必须满足）：
-    #   1. 出现了 id 以 multi-message-card-finish-anchor- 开头的"完成锚点"，这是千问
-    #      在回答真正结束时插入的隐藏标记；
-    #   2. 回答卡片的底部"反馈工具条"（复制/点赞等按钮）已经出现，说明回答已渲染收尾；
-    #   3. 正文文本连续两轮（约 4 秒）不变，说明不再流式追加。
-    # 用"完成锚点 + 工具条 + 文本稳定"三重判定比只看一个信号更可靠。
     deadline = time.time() + timeout_minutes * 60
     last_log = time.time()
     previous = ""
@@ -260,11 +264,6 @@ def wait_for_answer(page, timeout_minutes=20):
 
 
 def extract_answer(page):
-    # 提取最终回答正文（保留 HTML 结构）。
-    #
-    # 用注入 JS 的原因和 kimi.py 的 message_data 一样：要干净地剥离按钮/脚本/样式等
-    # 噪音、只保留 Markdown 渲染后的正文本体。策略：从最后一条可见回答卡片里取
-    # .qk-markdown，做 cleanHtml 清洗；卡片取不到就退到全局 .qk-markdown 兜底。
     log("提取回答内容 (HTML格式)")
     try:
         answer_content = page.evaluate(
@@ -323,9 +322,6 @@ def extract_answer(page):
 
 
 def thinking_workflow(answer):
-    # 在回答卡片所属的「回答包裹容器」（data-chat-answers-wrap）里找到思考/工作流卡片
-    # （data-card_name 为 deep_think 或 bar_workflow），返回可见的那一个，找不到返回 None。
-    # 这是展开/提取思考的真正作用域：思考内容不一定紧贴正文，而是散在包裹容器的子卡片里。
     response = answer.locator(
         "xpath=ancestor::*[@data-chat-answers-wrap][1]"
     )
@@ -341,16 +337,6 @@ def thinking_workflow(answer):
 
 
 def extract_thinking(page):
-    # 提取深度思考内容（保留 HTML）。这是千问脚本里最"绕"的一段，因为它用大段注入 JS
-    # 做了启发式分离：
-    #   1. 定位到"回答包裹容器"里的最后一条回答卡片，作为"答案起点"；
-    #   2. 把位于答案卡片上方（rect.top < answerTop）的 message-card / deep_think /
-    #      bar_workflow 卡片收集为"思考步骤"，按 DOM 垂直位置排序；
-    #   3. 对每张步骤卡片，分别尝试提取：步骤标题、Markdown 正文、搜索关键词、引号内
-    #      的引用语、相关搜索 pill 等，并用 sameContent()/seenTexts 去重，避免重复；
-    #   4. 都取不到时，退到全容器兜底。
-    # 之所以这么复杂，是因为千问把"搜索 → 思考 → 回答"揉进同一条消息流，没有干净的
-    # 分界线，只能靠结构和文本特征去猜。
     log("提取思考内容(HTML格式)")
     try:
         thinking_content = page.evaluate(
@@ -578,13 +564,7 @@ def extract_thinking(page):
         return ""
 
 def expand_thinking(page):
-    """展开当前回答的思考区域，便于阅读和截图。
-
-    千问的思考默认折叠（用 .grid.opacity-0 隐藏）。这里先找展开开关（cursor-pointer
-    或"已完成思考/深度思考已完成"文字），点它；若点击后仍没展开，就退而求其次——直接
-    注入样式把 .grid 的 grid-template-rows/opacity/max-height/overflow 强制改掉，
-    强行让折叠内容显示出来（截图前这么改是安全的，只影响展示不影响功能）。
-    """
+    """展开当前回答的思考区域，便于阅读和截图。"""
     answer = visible_answer(page)
     if answer is None:
         return False
@@ -625,10 +605,6 @@ def expand_thinking(page):
     return expanded
 
 def extract_sources(page, close=True):
-    # 提取回答引用的"参考来源"网址。
-    # 千问的来源藏在右侧面板里，卡片本身不直接放 url，而是把数据塞进 HTML 属性
-    # data-extra / data-exposure-extra 的 JSON 里（经过 html 转义），所以要 json.loads
-    # 解析出来取 ref_url/title。close=True 时用 Esc 关闭面板。
     answer = visible_answer(page)
     if answer is None:
         return []
@@ -699,18 +675,7 @@ def safe_filename(text):
 
 
 def capture_screenshot(page, number, question, save_path):
-    """保存最新问题、完整思考、回答和右侧来源长截图。
-
-    设计思路（不同于 kimi/doubao 的"克隆 DOM"，这里用"临时放大视口"）：
-      千问是左右两栏滚动布局（左：对话流，右：来源面板）。要截完整长图，做法是——
-      1. 先注入 JS 把折叠的思考区强制展开、把各滚动容器(主滚动区 + 来源列表)滚回顶部，
-         并量出主内容/回答/来源各自的高度；
-      2. 取这些高度的最大值，临时把浏览器视口高度 set_viewport_size 拉大到这个值；
-      3. 用 clip 只截"内容区"那一块（x 从内容左边界起、宽到视口右缘、高为算出高度）；
-      4. finally 里必须把视口还原回原来的尺寸，避免影响后续操作。
-    之所以用"放大视口+clip"而不是克隆 DOM，是因为千问的长列表结构复杂、克隆容易丢
-    交互样式，放大视口能最真实地还原页面原貌。
-    """
+    """保存最新问题、完整思考、回答和右侧来源长截图。"""
     viewport = page.viewport_size or {"width": 1280, "height": 900}
     dimensions = page.evaluate(
         """() => {
@@ -796,25 +761,195 @@ def capture_screenshot(page, number, question, save_path):
     log(f"截图已保存：{save_path}")
 
 
-def handle_unit(page, unit):
-    """处理单个任务单元（1 问题 x 1 千问 = 1 条 task_result）。由 worker 循环调用。
+def _is_qwen_agent(name):
+    normalized = str(name).lower().strip()
+    return normalized in ("qwen", "qianwen", "千问","通义千问","Qwen")
 
-    流程：新建对话 -> 切思考模式 -> 提问 -> 等回答 -> 提取正文/思考/来源 -> 长截图
-    -> 上传截图 -> 回调结果。
 
-    异常处理设计（重要）：无论成功失败最终都必须回调一次置为该单元终态（SUCCESS /
-    FAILED），否则后端只能等租约超时回收，白白多等。所以 try 成功走 SUCCESS，except
-    兜底走 FAILED。
-    """
-    task_no = str(unit.get("taskNo"))
-    agent_name = unit.get("aiPlatform") or "qianwen"
-    question = str(unit.get("questionText") or "")
+def init_lock_db():
+    conn = sqlite3.connect(str(LOCK_DB))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS global_lock (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            locked_by TEXT NOT NULL,
+            locked_at REAL NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-    output_dir = os.path.join(str(SCREENSHOT_DIR), task_no)
+
+def acquire_global_lock(platform_name):
+    start = time.time()
+    while time.time() - start < LOCK_TIMEOUT:
+        try:
+            conn = sqlite3.connect(str(LOCK_DB))
+            try:
+                conn.execute("BEGIN EXCLUSIVE")
+                row = conn.execute(
+                    "SELECT locked_by, locked_at FROM global_lock WHERE id=1"
+                ).fetchone()
+                if row:
+                    holder, lock_time = row
+                    conn.commit()
+                    conn.close()
+                    elapsed = time.time() - lock_time
+                    if elapsed > LOCK_EXPIRE_SECONDS:
+                        log(f"发现过期锁 (被 {holder} 持有 {elapsed:.0f}秒)，强制获取")
+                        cleanup = sqlite3.connect(str(LOCK_DB))
+                        cleanup.execute("DELETE FROM global_lock WHERE id=1")
+                        cleanup.commit()
+                        cleanup.close()
+                        time.sleep(1)
+                        continue
+                    log(f"全局锁被 {holder} 持有 ({elapsed:.0f}秒)，等待 {LOCK_POLL_INTERVAL}秒...")
+                    time.sleep(LOCK_POLL_INTERVAL)
+                    continue
+                conn.execute(
+                    "INSERT INTO global_lock (id, locked_by, locked_at) VALUES (1, ?, ?)",
+                    (platform_name, time.time())
+                )
+                conn.commit()
+                conn.close()
+                log(f"[{platform_name}] 获取全局锁成功")
+                return True
+            except Exception:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    pass
+                time.sleep(LOCK_POLL_INTERVAL)
+        except Exception as e:
+            log(f"锁连接异常: {e}")
+            time.sleep(LOCK_POLL_INTERVAL)
+    log(f"[{platform_name}] 获取全局锁超时 ({LOCK_TIMEOUT}秒)")
+    return False
+
+
+def heartbeat_global_lock(platform_name):
+    try:
+        conn = sqlite3.connect(str(LOCK_DB))
+        conn.execute("UPDATE global_lock SET locked_at=? WHERE id=1 AND locked_by=?",
+                     (time.time(), platform_name))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def release_global_lock(platform_name):
+    try:
+        conn = sqlite3.connect(str(LOCK_DB))
+        conn.execute("BEGIN EXCLUSIVE")
+        conn.execute("DELETE FROM global_lock WHERE id=1 AND locked_by=?", (platform_name,))
+        conn.commit()
+        conn.close()
+        log(f"[{platform_name}] 已释放全局锁")
+    except Exception as e:
+        log(f"释放全局锁异常: {e}")
+
+
+def republish_messages(body_list):
+    if not body_list:
+        return
+    try:
+        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+        parameters = pika.ConnectionParameters(
+            host=RABBITMQ_HOST,
+            port=RABBITMQ_PORT,
+            credentials=credentials,
+            connection_attempts=3,
+            retry_delay=5
+        )
+        connection = pika.BlockingConnection(parameters)
+        channel = connection.channel()
+        for body in body_list:
+            channel.basic_publish(
+                exchange='',
+                routing_key=RABBITMQ_QUEUE,
+                body=body,
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            log("消息已重新发布到队列")
+        connection.close()
+    except Exception as e:
+        log(f"重新发布消息失败: {e}")
+
+
+def fetch_message():
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        credentials=credentials,
+        connection_attempts=3,
+        retry_delay=5
+    )
+    connection = pika.BlockingConnection(parameters)
+    channel = connection.channel()
+
+    method_frame, header_frame, body = channel.basic_get(queue=RABBITMQ_QUEUE, auto_ack=False)
+
+    if not method_frame:
+        connection.close()
+        return None, None
+
+    try:
+        data = json.loads(body.decode("utf-8"))
+        task_id = data.get("taskId")
+        agent_list = data.get("agentList", [])
+        result_id_map = data.get("resultIdMap", {})
+        output_dir = data.get("outputDir", "")
+
+        qwen_agents = [a for a in agent_list if _is_qwen_agent(a)]
+        other_agents = [a for a in agent_list if not _is_qwen_agent(a)]
+
+        if not qwen_agents:
+            log(f"代理列表 {agent_list} 中没有 Qianwen，交还队列给其他脚本")
+            channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=True)
+            connection.close()
+            return None, None
+
+        republish_list = []
+        if other_agents:
+            other_data = dict(data)
+            other_data["agentList"] = other_agents
+            new_body = json.dumps(other_data, ensure_ascii=False).encode("utf-8")
+            republish_list.append(new_body)
+            log(f"将非 Qianwen 代理 {other_agents} 拆出，处理完后重新发布")
+
+        channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+        connection.close()
+
+        question_list = []
+        for q in data.get("questionList", []):
+            if isinstance(q, dict):
+                question_list.append(q.get("content", ""))
+            else:
+                question_list.append(str(q))
+
+        return ({
+            "taskId": task_id,
+            "agentList": qwen_agents,
+            "questionList": question_list,
+            "resultIdMap": result_id_map,
+            "outputDir": output_dir
+        }, republish_list)
+
+    except Exception as e:
+        log(f"解析消息失败: {e}")
+        channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=True)
+        connection.close()
+        raise
+
+
+def process_question(page, task_id, agent_name, question, output_dir, result_id_map, index, total):
+    log(f"[{index}/{total}] 处理问题: {question[:50]}...")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     os.makedirs(output_dir, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    screenshot_file = os.path.join(output_dir, f"{task_no}_{timestamp}.png")
+    screenshot_file = os.path.join(output_dir, f"{task_id}_{agent_name}_{timestamp}_{index}.png")
 
     thinking = ""
     answer = ""
@@ -822,9 +957,6 @@ def handle_unit(page, unit):
     image_url = None
 
     thinking_enabled = False
-
-    # 开始处理前短暂停顿，避免操作节奏过于机械。
-    time.sleep(random.uniform(1, 3))
 
     try:
         new_chat(page)
@@ -843,7 +975,7 @@ def handle_unit(page, unit):
         log("等待思考区域完全渲染...")
         page.wait_for_timeout(2000)
 
-        capture_screenshot(page, task_no, question, screenshot_file)
+        capture_screenshot(page, index, question, screenshot_file)
 
         source_info = json.dumps(
             [[s.get("title", ""), s.get("url", "")] for s in (source_items or [])],
@@ -851,56 +983,53 @@ def handle_unit(page, unit):
         )
         log(f"来源信息: {source_info}")
 
-        image_url = worker_upload(screenshot_file, task_no)
+        image_url = upload_screenshot(screenshot_file, task_id)
         if not image_url:
             log("截图上传失败，使用本地路径回调")
             image_url = screenshot_file
 
-        ok = worker_callback(
-            unit,
-            status="SUCCESS",
-            answer_text=answer,
+        callback_backend(
+            task_id=task_id,
+            agent_name=agent_name,
+            question_content=question,
             thinking_content=thinking,
+            answer_content=answer,
             source_info=source_info,
             image_url=image_url,
-            error_msg=None,
+            status="SUCCESS",
+            error_msg=None
         )
-        log(f"回调结果: {'成功' if ok else '失败'}")
-        log("单元处理完成")
+
+        log(f"[{index}/{total}] 问题处理完成")
 
     except Exception as e:
-        log(f"单元处理异常: {e}")
+        log(f"[{index}/{total}] 问题处理失败: {e}")
         source_info = json.dumps(
             [[s.get("title", ""), s.get("url", "")] for s in (source_items or [])],
             ensure_ascii=False
         )
-        worker_callback(
-            unit,
-            status="FAILED",
-            answer_text=answer,
+        callback_backend(
+            task_id=task_id,
+            agent_name=agent_name,
+            question_content=question,
             thinking_content=thinking,
+            answer_content=answer,
             source_info=source_info,
             image_url=image_url,
-            error_msg=str(e),
+            status="FAILED",
+            error_msg=str(e)
         )
-    finally:
-        # 每个单元处理完后随机休息 40~90 秒，降低提问频率，避免触发风控。
-        log("单元结束，随机休息中...")
-        wait_time = random.randint(40, 90)
-        log(f"等待 {wait_time} 秒后处理下一条...")
-        time.sleep(wait_time)
 
 
 def main():
-    # 入口：启动浏览器 -> 登录 -> 进入认领循环。
-    # launch_persistent_context + user_data_dir 持久化登录态。
-    #
-    # 反检测启动参数说明（重要）：
-    #   --disable-blink-features=AutomationControlled：隐藏 blink 层自动化标志。
-    #   【已移除】--no-sandbox / --disable-setuid-sandbox：这两个参数会在页面顶部
-    #     弹出黄色警告条"你使用的是不受支持的命令行标志"，是最显眼的自动化特征，
-    #     必须去掉。Windows 上不需要 sandbox 相关参数。
-    log("启动 Qianwen Worker（认领模式，无全局锁）")
+    log("启动 RabbitMQ 消费者 (千问)")
+    log(f"服务器: {RABBITMQ_HOST}:{RABBITMQ_PORT}")
+    log(f"队列: {RABBITMQ_QUEUE}")
+    log(f"后端: {BACKEND_BASE_URL}")
+
+    init_lock_db()
+    log("全局锁数据库已初始化")
+
     log("打开浏览器...")
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
@@ -911,83 +1040,112 @@ def main():
             args=[
                 "--start-maximized",
                 "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--disable-extensions",
-                "--disable-features=IsolateOrigins,site-per-process"
+                "--no-sandbox",
+                "--disable-setuid-sandbox"
             ]
-        )
-
-        # 注入反检测脚本：在每个页面 document 创建前执行，覆盖常见的自动化探测点。
-        # 这些属性如果暴露真实值，千问前端 JS 能直接判定为机器人并拒绝回答。
-        browser.add_init_script(
-            """
-            () => {
-                // 1. navigator.webdriver 必须是 undefined
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                    configurable: true
-                });
-
-                // 2. 补上 window.chrome 对象（自动化浏览器通常缺失）
-                window.chrome = window.chrome || {};
-                window.chrome.runtime = window.chrome.runtime || {
-                    OnInstalledReason: {},
-                    OnRestartRequiredReason: {},
-                    PlatformArch: {},
-                    PlatformNaclArch: {},
-                    PlatformOs: {},
-                    RequestUpdateCheckStatus: {}
-                };
-
-                // 3. 修正 languages（自动化环境常是空数组）
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
-                    configurable: true
-                });
-
-                // 4. 修正 plugins 长度（0 是典型机器人特征）
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5],
-                    configurable: true
-                });
-
-                // 5. permissions.query 对 notifications 返回正确状态
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({ state: Notification.permission })
-                        : originalQuery(parameters)
-                );
-
-                // 6. 覆盖 toString，防止 Function.prototype.toString 检测
-                const originalToString = Function.prototype.toString;
-                Function.prototype.toString = function() {
-                    if (this === window.navigator.permissions.query) {
-                        return 'function query() { [native code] }';
-                    }
-                    return originalToString.call(this);
-                };
-            }
-            """
         )
 
         page = browser.pages[0] if browser.pages else browser.new_page()
 
         page.goto(QWEN_URL, wait_until="domcontentloaded")
         log("千问已打开")
-        time.sleep(random.uniform(2, 5))
 
         ready(page)
 
-        # run_worker_loop 是 worker_lib.py 提供的公共循环：反复认领单元 -> handle_unit
-        # 处理 -> 回调 -> 再认领，认领/心跳/回调的并发安全都在后端。
-        log("开始从任务池认领单元...")
-        try:
-            run_worker_loop("qianwen", page, handle_unit)
-        except KeyboardInterrupt:
-            log("收到中断信号，退出")
-        finally:
-            browser.close()
+        thinking_initialized = False
+
+        log("开始监听 RabbitMQ 队列...")
+        while True:
+            task = None
+            republish_list = []
+            try:
+                if not acquire_global_lock(PLATFORM_NAME):
+                    log("获取全局锁超时，10秒后重试...")
+                    time.sleep(10)
+                    continue
+
+                try:
+                    task, republish_list = fetch_message()
+                except Exception as e:
+                    log(f"获取消息异常: {e}")
+                    release_global_lock(PLATFORM_NAME)
+                    time.sleep(5)
+                    continue
+
+                if not task:
+                    release_global_lock(PLATFORM_NAME)
+                    log("队列暂无匹配消息，10秒后重试...")
+                    time.sleep(10)
+                    continue
+
+                task_id = task["taskId"]
+                agent_list = task["agentList"]
+                question_list = task["questionList"]
+                result_id_map = task["resultIdMap"]
+                output_dir = task["outputDir"]
+
+                log(f"收到任务: taskId={task_id}, 问题数={len(question_list)}, 代理数={len(agent_list)}")
+
+                if not question_list:
+                    log("问题列表为空，跳过")
+                    republish_messages(republish_list)
+                    release_global_lock(PLATFORM_NAME)
+                    time.sleep(10)
+                    continue
+
+                try:
+                    agent_name = agent_list[0] if agent_list else "qianwen"
+                    last_heartbeat = 0
+
+                    for idx, question in enumerate(question_list, start=1):
+                        if not question:
+                            log(f"问题 {idx} 为空，跳过")
+                            continue
+
+                        heartbeat_global_lock(PLATFORM_NAME)
+                        last_heartbeat = time.time()
+
+                        process_question(
+                            page=page,
+                            task_id=task_id,
+                            agent_name=agent_name,
+                            question=question,
+                            output_dir=output_dir or str(SCREENSHOT_DIR),
+                            result_id_map=result_id_map,
+                            index=idx,
+                            total=len(question_list)
+                        )
+
+                        wait_time = random.randint(40, 90)
+                        log(f"等待{wait_time}秒后处理下一条...")
+                        deadline = time.time() + wait_time
+                        while time.time() < deadline:
+                            time.sleep(1)
+                            if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL:
+                                heartbeat_global_lock(PLATFORM_NAME)
+                                last_heartbeat = time.time()
+
+                    log(f"任务 {task_id} 处理完成")
+
+                finally:
+                    release_global_lock(PLATFORM_NAME)
+
+                republish_messages(republish_list)
+                if republish_list:
+                    log("已将非 Qianwen 代理消息重新发布到队列")
+                log("等待10秒后继续监听...")
+                time.sleep(10)
+
+            except pika.exceptions.AMQPConnectionError as e:
+                log(f"RabbitMQ 连接错误: {e}, 5秒后重连...")
+                time.sleep(5)
+            except Exception as e:
+                log(f"主循环异常: {e}, 10秒后重试...")
+                try:
+                    release_global_lock(PLATFORM_NAME)
+                except Exception:
+                    pass
+                time.sleep(10)
 
 
 if __name__ == "__main__":

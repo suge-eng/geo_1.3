@@ -114,6 +114,7 @@ def ensure_login(page):
             try:
                 input_box(page).click(trial=True, timeout=2000)
                 log("账号登录成功，登录状态已保存")
+                human_wait(1, 3)
                 return
             except Exception:
                 pass
@@ -460,8 +461,9 @@ def ask(page, question):
             time.sleep(random.uniform(2, 5))
             box = ready(page)
             old = {m["id"] for m in messages(page)}
-            box.fill(question)
-            time.sleep(random.uniform(1, 2))
+            box.click(force=True)
+            box.fill(question, force=True)
+            time.sleep(random.uniform(2, 5))
             send = page.locator(".send-button-container").last
             send.wait_for(state="visible", timeout=10000)
             page.wait_for_function(
@@ -513,6 +515,9 @@ def handle_unit(page, unit):
     sources = []
     image_url = None
 
+    # 模拟真人在开始处理前先"看一眼问题"的短暂停顿，避免操作节奏过于机械。
+    human_wait(1, 3)
+
     try:
         result = ask(page, question)
         answer = result["answer"].strip()
@@ -552,6 +557,12 @@ def handle_unit(page, unit):
             image_url=image_url,
             error_msg=str(e),
         )
+    finally:
+        # 每个单元处理完后随机休息 40~90 秒，降低提问频率，避免触发风控。
+        log("单元结束，随机休息中...")
+        wait_time = random.randint(40, 90)
+        log(f"等待 {wait_time} 秒后处理下一条...")
+        time.sleep(wait_time)
 
 
 def main():
@@ -572,9 +583,52 @@ def main():
             args=[
                 "--start-maximized",
                 "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox"
+                "--disable-infobars",
+                "--disable-extensions",
+                "--disable-features=IsolateOrigins,site-per-process"
             ]
+        )
+
+        # 注入反检测脚本：覆盖常见自动化探测点。
+        browser.add_init_script(
+            """
+            () => {
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                    configurable: true
+                });
+                window.chrome = window.chrome || {};
+                window.chrome.runtime = window.chrome.runtime || {
+                    OnInstalledReason: {},
+                    OnRestartRequiredReason: {},
+                    PlatformArch: {},
+                    PlatformNaclArch: {},
+                    PlatformOs: {},
+                    RequestUpdateCheckStatus: {}
+                };
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+                    configurable: true
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5],
+                    configurable: true
+                });
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters)
+                );
+                const originalToString = Function.prototype.toString;
+                Function.prototype.toString = function() {
+                    if (this === window.navigator.permissions.query) {
+                        return 'function query() { [native code] }';
+                    }
+                    return originalToString.call(this);
+                };
+            }
+            """
         )
 
         if browser.pages:
@@ -584,6 +638,7 @@ def main():
 
         page.goto(URL, wait_until="domcontentloaded")
         log("Kimi 已打开")
+        human_wait(2, 5)
 
         ready(page)
         log("已登录")

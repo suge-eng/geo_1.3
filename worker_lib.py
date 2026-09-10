@@ -24,8 +24,8 @@ import time
 import requests
 from datetime import datetime
 
-RPA_SERVICE_URL = os.getenv("RPA_SERVICE_URL", "http://localhost:8084")
-BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://localhost:8080")
+RPA_SERVICE_URL = os.getenv("RPA_SERVICE_URL", "http://172.28.30.78:8084")
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://172.28.30.78:8080")
 CLAIM_IDLE_SLEEP = int(os.getenv("CLAIM_IDLE_SLEEP", "5"))
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "60"))
 
