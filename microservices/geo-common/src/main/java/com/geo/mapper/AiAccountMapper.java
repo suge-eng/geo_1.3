@@ -94,12 +94,29 @@ public interface AiAccountMapper extends BaseMapper<AiAccount> {
 
     /**
      * 【释放账号】worker 用完后（或换号时）主动释放，让账号重新变为可分配状态。
-     * 同时清零 batch_count、清零冷却时间（如果账号被标记冷却了，也一并清掉让它重新可用？
-     * 不——冷却应该只在触发风控时设置，worker 主动释放不该自动清冷却。这里只清 worker 绑定即可）。
+     * 只清 worker 绑定 + 批次计数，不改状态、不写冷却时间。
+     * 设计思路：这个方法是"通用释放绑定"语义，冷却与否由调用方决定，
+     * 所以这里保持最小副作用，避免误伤其它只想释放绑定的场景。
      */
     @Update("UPDATE ai_account SET worker_id = NULL, batch_count = 0 " +
             "WHERE id = #{accountId} AND worker_id = #{workerId}")
     int releaseByWorker(@Param("accountId") Long accountId, @Param("workerId") String workerId);
+
+    /**
+     * 【释放账号并写入冷却】（原子操作）worker 用完/换号时，用单条 SQL 同时完成：
+     *   1. 清 worker 绑定 + batch_count
+     *   2. 置状态 MAINTENANCE + 冷却到 now()+cooldownMinutes 分钟
+     * 设计思路：早期实现是"先 releaseByWorker 清绑定、再 updateStatusAndCooldown 补冷却"两段式，
+     *   中间会被清扫器(每30秒 reclaimIdleWorkerAccounts)插队造成 worker_id 不匹配，
+     *   导致 released=0、冷却被静默跳过。这里合并成一条原子 UPDATE，WHERE 用 id+worker_id 兜底，
+     *   要么整条成功、要么整条不生效，从根上消除竞态。
+     */
+    @Update("UPDATE ai_account SET worker_id = NULL, batch_count = 0, " +
+            "status = 'MAINTENANCE', cooldown_until = NOW() + INTERVAL #{cooldownMinutes} MINUTE " +
+            "WHERE id = #{accountId} AND worker_id = #{workerId}")
+    int releaseAndCooldownAccount(@Param("accountId") Long accountId,
+                                  @Param("workerId") String workerId,
+                                  @Param("cooldownMinutes") int cooldownMinutes);
 
     /**
      * 【释放所有被某个 worker 持有的账号】worker 下线/宕机清扫时用。

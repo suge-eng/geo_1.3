@@ -120,13 +120,11 @@ public class AccountPoolService {
      */
     @Transactional
     public boolean releaseAccount(Long accountId, String workerId) {
-        int released = aiAccountMapper.releaseByWorker(accountId, workerId);
+        // 一次原子操作完成「释放绑定 + 置冷却」，防止两步之间的清扫器回收造成冷却被静默跳过
+        int released = aiAccountMapper.releaseAndCooldownAccount(accountId, workerId, DEFAULT_COOLDOWN_MINUTES);
         if (released > 0) {
-            // 释放成功 → 设冷却 10 分钟，让账号"呼吸"，降低风控风险
-            LocalDateTime cooldownUntil = LocalDateTime.now().plusMinutes(DEFAULT_COOLDOWN_MINUTES);
-            aiAccountMapper.updateStatusAndCooldown(accountId, AccountStatus.MAINTENANCE.name(), cooldownUntil);
-            log.info("worker[{}] 成功释放账号并设置 {} 分钟冷却: accountId={}, cooldownUntil={}",
-                    workerId, DEFAULT_COOLDOWN_MINUTES, accountId, cooldownUntil);
+            log.info("worker[{}] 成功释放账号并设置 {} 分钟冷却: accountId={}",
+                    workerId, DEFAULT_COOLDOWN_MINUTES, accountId);
             return true;
         }
         log.warn("worker[{}] 释放账号失败（可能已被回收或不属于该 worker）: accountId={}", workerId, accountId);
