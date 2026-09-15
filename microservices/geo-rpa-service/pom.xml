@@ -39,6 +39,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
+
+        <!-- Knife4j API 文档（嵌入式，服务启动后访问 /doc.html） -->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+        </dependency>
         <!-- Redis：与任务服务共享账号池/任务租约等状态 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

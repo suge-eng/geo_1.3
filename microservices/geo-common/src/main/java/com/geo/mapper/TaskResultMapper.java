@@ -114,6 +114,14 @@ public interface TaskResultMapper extends BaseMapper<TaskResult> {
     int clearLeaseByUnitId(@Param("id") Long id);
 
     /**
+     * 【认领时绑定账号】worker 认领单元时，如果已经从账号池借到了账号，
+     * 就把 account_id 写入 task_result，回调时好知道用哪个账号更新。
+     * 条件带 status='RUNNING' 双重保险：只有刚认领到的 RUNNING 单元才能绑定。
+     */
+    @Update("UPDATE task_result SET account_id = #{accountId} WHERE id = #{id} AND status = 'RUNNING'")
+    int bindAccountToUnit(@Param("id") Long id, @Param("accountId") Long accountId);
+
+    /**
      * 【死任务回收】定时任务定期调用：
      * 租约过期（Worker没续心跳）+ 还在RUNNING → 说明Worker大概率崩溃了
      * → 把任务放回PENDING状态，让其他健康的Worker接手。

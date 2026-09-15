@@ -60,4 +60,66 @@ public interface AiAccountMapper extends BaseMapper<AiAccount> {
      */
     @Update("UPDATE ai_account SET status = #{status}, cooldown_until = #{cooldownUntil} WHERE id = #{id}")
     int updateStatusAndCooldown(@Param("id") Long id, @Param("status") String status, @Param("cooldownUntil") LocalDateTime cooldownUntil);
+
+    // ========== 以下是 worker 账号池调度新增的方法 ==========
+
+    /**
+     * 【worker 账号分配】挑一批空闲账号（最多 5 个，LIMIT 5），返回 List 供服务端逐个原子尝试绑定。
+     * SQL 条件保证只从 worker_id IS NULL 的账号里选，防止重复分配。
+     * 排序：priority DESC + daily_used ASC + RAND()，高优先级/用量少/随机。
+     */
+    List<AiAccount> selectIdleAccountForWorker(@Param("platform") String platform);
+
+    /**
+     * 【原子绑定】把一个空闲账号绑定给指定 worker。
+     * 条件：worker_id IS NULL AND id = #{accountId} AND platform = #{platform} AND status = 'ACTIVE'
+     * 返回受影响行数，0 表示已被别人抢走或不可用。
+     * daily_limit <= 0 表示无限额度。
+     */
+    @Update("UPDATE ai_account SET worker_id = #{workerId}, batch_count = 0, borrowed_at = NOW(), last_request_at = NOW(), daily_used = daily_used + 1 " +
+            "WHERE id = #{accountId} AND platform = #{platform} AND status = 'ACTIVE' AND worker_id IS NULL " +
+            "AND (cooldown_until IS NULL OR cooldown_until < NOW()) " +
+            "AND (daily_limit IS NULL OR daily_limit <= 0 OR daily_used < daily_limit) " +
+            "AND consecutive_failures < max_consecutive_failures")
+    int bindWorker(@Param("accountId") Long accountId, @Param("platform") String platform, @Param("workerId") String workerId);
+
+    /**
+     * 【原子递增批次计数】worker 处理完一个问题后 batch_count + 1。
+     * 当 batch_count 达到 BATCH_SIZE（服务端判断或调用方判断）时 worker 应主动释放。
+     * 只有持有该账号的 worker 才能递增（WHERE worker_id = #{workerId}）。
+     */
+    @Update("UPDATE ai_account SET batch_count = batch_count + 1, daily_used = daily_used + 1, last_request_at = NOW(), consecutive_failures = 0 " +
+            "WHERE id = #{accountId} AND worker_id = #{workerId}")
+    int incrementBatchAndDailyUsed(@Param("accountId") Long accountId, @Param("workerId") String workerId);
+
+    /**
+     * 【释放账号】worker 用完后（或换号时）主动释放，让账号重新变为可分配状态。
+     * 同时清零 batch_count、清零冷却时间（如果账号被标记冷却了，也一并清掉让它重新可用？
+     * 不——冷却应该只在触发风控时设置，worker 主动释放不该自动清冷却。这里只清 worker 绑定即可）。
+     */
+    @Update("UPDATE ai_account SET worker_id = NULL, batch_count = 0 " +
+            "WHERE id = #{accountId} AND worker_id = #{workerId}")
+    int releaseByWorker(@Param("accountId") Long accountId, @Param("workerId") String workerId);
+
+    /**
+     * 【释放所有被某个 worker 持有的账号】worker 下线/宕机清扫时用。
+     */
+    @Update("UPDATE ai_account SET worker_id = NULL, batch_count = 0 WHERE worker_id = #{workerId}")
+    int releaseAllByWorker(@Param("workerId") String workerId);
+
+    /**
+     * 【冷却到期自动恢复】把 cooldown_until < NOW() 的 MAINTENANCE 账号恢复为 ACTIVE。
+     * 定时任务每 30 秒调一次。同时清零 consecutive_failures（冷却完说明风险解除了）。
+     */
+    @Update("UPDATE ai_account SET status = 'ACTIVE', cooldown_until = NULL, consecutive_failures = 0 " +
+            "WHERE status = 'MAINTENANCE' AND cooldown_until IS NOT NULL AND cooldown_until < NOW()")
+    int recoverExpiredCooldown();
+
+    /**
+     * 【日额度耗尽自动恢复】把 daily_limit > 0 但 daily_used >= daily_limit 的 EXHAUSTED 账号恢复为 ACTIVE。
+     * 等次日 resetDailyUsed 把 daily_used 清零后自然就满足条件了。
+     */
+    @Update("UPDATE ai_account SET status = 'ACTIVE' " +
+            "WHERE status = 'EXHAUSTED' AND (daily_limit IS NULL OR daily_limit <= 0 OR daily_used < daily_limit)")
+    int recoverExhaustedAccounts();
 }

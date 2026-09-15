@@ -58,6 +58,7 @@
         <poi.version>5.2.5</poi.version>                         <!-- Apache POI（解析 Excel 上传的题目清单） -->
         <commons-compress.version>1.25.0</commons-compress.version> <!-- Commons Compress（解压 RPA 上传的压缩包） -->
         <minio.version>8.5.7</minio.version>                     <!-- MinIO 对象存储 SDK（保存报告与附件文件） -->
+        <knife4j.version>4.5.0</knife4j.version>                 <!-- Knife4j API 文档（基于 SpringDoc OpenAPI 3，Spring Boot 3 专用） -->
     </properties>
 
     <!--
@@ -114,6 +115,13 @@
                 <groupId>io.minio</groupId>
                 <artifactId>minio</artifactId>
                 <version>${minio.version}</version>
+            </dependency>
+
+            <!-- Knife4j：美化版 SpringDoc OpenAPI 文档（Spring Boot 3 用 jakarta 版本） -->
+            <dependency>
+                <groupId>com.github.xiaoymin</groupId>
+                <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+                <version>${knife4j.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

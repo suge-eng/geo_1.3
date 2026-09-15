@@ -43,10 +43,11 @@ public class RpaWorkerDispatcherService {
      *
      * @param platform 平台 code（如 deepseek / doubao / kimi / wenxin / qianwen / tencent）
      * @param workerId worker 标识（机器名）
+     * @param accountId 当前 worker 绑定的 AI 账号 ID（可为 null，不传则不记录账号）
      * @return 认领到的单元；当前无可执行单元时返回 null
      */
     @Transactional
-    public TaskResult claimUnit(String platform, String workerId) {
+    public TaskResult claimUnit(String platform, String workerId, Long accountId) {
         LocalDateTime now = LocalDateTime.now();
         // 关键一步：claimNextPending 底层使用 SELECT ... FOR UPDATE SKIP LOCKED，
         // 并发下多个 worker 同时认领也只会各自拿到「没有被别人锁住」的不同行，
@@ -62,8 +63,15 @@ public class RpaWorkerDispatcherService {
         unit.setAssignee(workerId);
         unit.setLeaseExpiresAt(now.plusSeconds(leaseSeconds));
         unit.setStartedAt(now);
-        log.info("worker[{}] 认领单元: unitId={}, taskNo={}, platform={}, question={}",
-                workerId, unit.getId(), unit.getTaskNo(), platform,
+
+        // ========== 新增：如果 worker 绑定了账号，记录到 task_result.account_id ==========
+        if (accountId != null) {
+            taskResultMapper.bindAccountToUnit(unit.getId(), accountId);
+            unit.setAccountId(accountId);
+        }
+
+        log.info("worker[{}] 认领单元: unitId={}, taskNo={}, platform={}, accountId={}, question={}",
+                workerId, unit.getId(), unit.getTaskNo(), platform, accountId,
                 unit.getQuestionText() != null ? unit.getQuestionText().substring(0, Math.min(30, unit.getQuestionText().length())) : "");
         return unit;
     }
@@ -113,6 +121,9 @@ public class RpaWorkerDispatcherService {
     /**
      * 清扫器：回收租约过期的 RUNNING 单元，使其回到任务池。
      * 覆盖脚本崩溃、电脑关机、网络断开等异常场景，保证任务不卡死。
+     *
+     * 注：账号池侧的离线 worker 账号清扫由 AccountPoolService 自己的定时任务负责，
+     * 本类只做任务调度相关的清扫，避免跨 Service 耦合。
      */
     @Scheduled(fixedDelayString = "${geo.rpa.worker.reclaim-ms:30000}",
             initialDelayString = "${geo.rpa.worker.reclaim-initial-ms:10000}")

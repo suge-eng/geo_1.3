@@ -9,9 +9,9 @@ yuanbao.py —— 腾讯元宝（Yuanbao / 混元）平台的 RPA 自动化脚�
 
 二、元宝平台特有的难点（本脚本最值得学习的设计）
 ------------------------------------------------
-1. 深度思考是「对话级开关」：enable_deep_thinking() 通过 dt-button-id="deep_think"
-   按钮开启深度思考，是否开启靠 class 里含 ThinkSelector_selected 判定；开启后必须
-   校验真的生效，否则后续取不到思考内容。
+1. 深度思考是「对话级开关」：enable_deep_thinking() 通过 data-thinking-mode-switcher-
+   trigger 定位模式切换按钮，按按钮文本是否含"深度思考"判断开关状态；若未开启则点
+   击展开下拉菜单选择"深度思考"，开启后必须校验真的生效，否则后续取不到思考内容。
 2. 回答完成判定靠 convStatus：每条 AI 消息的 DOM 上有 data-conv-status / data-conv-
    outputting 属性，finished + 不再 outputting 即完成（见 ai_messages 的 done 字段）。
 3. 思考与回答分离：思考在 .hyc-component-deepsearch-cot 里，回答正文在 .hyc-content-md，
@@ -131,16 +131,26 @@ def new_chat(page):
 
 
 def enable_deep_thinking(page):
-    # 开启深度思考。靠 class 里含 ThinkSelector_selected 判断是否已开；没开则点按钮，
-    # 点完再校验，防止"点了没生效"。元宝深度思考是发问前必须开好的，否则拿不到思考。
-    button = page.locator('[dt-button-id="deep_think"][aria-label="深度思考"]').last
-    button.wait_for(state="visible", timeout=20000)
-    if "ThinkSelector_selected" in (button.get_attribute("class") or ""):
+    # 元宝思考模式切换器：按钮显示当前模式（文本如"深度思考"），data-active="true"
+    # 表示该模式已选中。若当前不是深度思考，点击切换器展开下拉菜单后选择"深度思考"。
+    switcher = page.locator('[data-thinking-mode-switcher-trigger="true"]').last
+    switcher.wait_for(state="visible", timeout=20000)
+
+    if "深度思考" in (switcher.inner_text() or ""):
         log("深度思考已开启")
         return
-    button.click(force=True)
+
+    switcher.click(force=True)
     page.wait_for_timeout(500)
-    if "ThinkSelector_selected" not in (button.get_attribute("class") or ""):
+
+    option = page.locator('[data-thinking-mode-switcher-trigger="true"]', has_text="深度思考").last
+    if option.count() == 0:
+        option = page.get_by_text("深度思考", exact=True).last
+    option.click(force=True)
+    page.wait_for_timeout(600)
+
+    switcher = page.locator('[data-thinking-mode-switcher-trigger="true"]').last
+    if "深度思考" not in (switcher.inner_text() or ""):
         raise RuntimeError("深度思考未能开启")
     log("已开启深度思考")
 
@@ -443,15 +453,38 @@ def handle_unit(page, unit):
 
 
 def main():
-    # 入口：启动浏览器 -> 登录 -> 进入认领循环。细节同其它平台脚本：
-    # launch_persistent_context 持久化登录态；--disable-blink-features=AutomationControlled
-    # 隐藏自动化特征；run_worker_loop 是 worker_lib 提供的认领主循环（认领/心跳/回调
-    # 的并发安全都在后端）。
-    log("启动 Yuanbao Worker（认领模式，无全局锁）")
-    log("打开浏览器...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE),
+    """Yuanbao Worker 进程入口（账号池模式）。
+
+    改动点（相比旧版）：
+      - 不再硬编码 PROFILE，而是账号池借号后按 account_id 建独立 profile 目录
+      - run_worker_loop 从 (platform, page, handle_unit) 改为 (platform, worker_context, handle_unit)
+      - 注意：run_worker_loop 传的是 "tencent"（后端 task_result.ai_platform 存的是 tencent）
+        而不是 PLATFORM_NAME="yuanbao"
+      - 一个账号跑满 BATCH_SIZE（默认10）个问题后，自动关浏览器、释放账号、借下一个
+    """
+    log("启动 Yuanbao Worker（账号池模式）")
+    log("注意：第一次使用某个账号时，需要在浏览器里手动登录一次，之后 cookie 会自动复用")
+
+    playwright_instance = None
+    browser = None
+    page = None
+
+    PROFILE_BASE = str(BASE_DIR / "edge_profiles")  # 所有账号的 profile 放这
+    os.makedirs(PROFILE_BASE, exist_ok=True)
+
+    def _open_browser(profile_dir):
+        nonlocal playwright_instance, browser, page
+        if browser is not None:
+            try: browser.close()
+            except Exception: pass
+        if playwright_instance is not None:
+            try: playwright_instance.stop()
+            except Exception: pass
+
+        log(f"打开浏览器，profile 目录: {profile_dir}")
+        playwright_instance = sync_playwright().start()
+        browser = playwright_instance.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
             channel="msedge",
             headless=False,
             no_viewport=True,
@@ -463,72 +496,62 @@ def main():
                 "--disable-features=IsolateOrigins,site-per-process"
             ]
         )
-
-        # 注入反检测脚本：覆盖常见自动化探测点。
         browser.add_init_script(
             """
             () => {
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                    configurable: true
-                });
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
                 window.chrome = window.chrome || {};
-                window.chrome.runtime = window.chrome.runtime || {
-                    OnInstalledReason: {},
-                    OnRestartRequiredReason: {},
-                    PlatformArch: {},
-                    PlatformNaclArch: {},
-                    PlatformOs: {},
-                    RequestUpdateCheckStatus: {}
-                };
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
-                    configurable: true
-                });
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5],
-                    configurable: true
-                });
+                window.chrome.runtime = window.chrome.runtime || { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'], configurable: true });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });
                 const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({ state: Notification.permission })
-                        : originalQuery(parameters)
-                );
+                window.navigator.permissions.query = (parameters) => (parameters.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(parameters));
                 const originalToString = Function.prototype.toString;
-                Function.prototype.toString = function() {
-                    if (this === window.navigator.permissions.query) {
-                        return 'function query() { [native code] }';
-                    }
-                    return originalToString.call(this);
-                };
+                Function.prototype.toString = function() { if (this === window.navigator.permissions.query) return 'function query() { [native code] }'; return originalToString.call(this); };
             }
             """
         )
-
         page = browser.pages[0] if browser.pages else browser.new_page()
-
         page.goto(URL, wait_until="domcontentloaded")
         log("元宝已打开")
         human_wait(2, 5)
-
         try:
             ensure_login(page)
             ready(page)
-            human_wait(1, 3)
+            log("已登录")
         except TimeoutError:
-            log("无法登录，退出")
-            browser.close()
-            return
+            log("登录超时，等待用户手动处理...")
+        human_wait(1, 3)
 
-        # run_worker_loop 会反复认领单元并调用 handle_unit 处理。
-        log("开始从任务池认领单元...")
-        try:
-            run_worker_loop("tencent", page, handle_unit)
-        except KeyboardInterrupt:
-            log("收到中断信号，退出")
-        finally:
-            browser.close()
+    def _close_browser():
+        nonlocal playwright_instance, browser, page
+        if browser is not None:
+            try: browser.close()
+            except Exception as e: log(f"关闭浏览器异常: {e}")
+            browser = None
+        if playwright_instance is not None:
+            try: playwright_instance.stop()
+            except Exception as e: log(f"停止 playwright 异常: {e}")
+            playwright_instance = None
+        page = None
+
+    def _get_page():
+        return page
+
+    worker_context = {
+        "get_page": _get_page,
+        "open_profile": _open_browser,
+        "close_browser": _close_browser,
+        "profile_base_dir": PROFILE_BASE,
+    }
+
+    log("开始进入账号池循环...")
+    try:
+        run_worker_loop("tencent", worker_context, handle_unit)  # 注意：后端平台名是 tencent
+    except KeyboardInterrupt:
+        log("收到中断信号，退出")
+    finally:
+        _close_browser()
 
 
 if __name__ == "__main__":

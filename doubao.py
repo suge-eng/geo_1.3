@@ -46,13 +46,34 @@ SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 # 一段注入到页面的 JS，作用是把「一个 AI 回答消息块」拆解成结构化的三部分：
 #   answer(正文) / thinking(思考过程 + 搜索引用) / sources(引用的网页来源)。
-# 之所以写这么长，是因为豆包的 DOM 没有稳定 class 可依，只能靠启发式规则：
-#   先定位正文容器(md-box-root 等)，再在正文"之前"的兄弟节点里找思考块，去重、
-#   剔除"搜索 N 个关键词"这类摘要行，最后从 tool-call 链接里摘出来源 URL。
-# 每个步骤都带"找不到就跳过/置空"的兜底，网页改版后顶多是某部分为空，不会崩。
+#
+# 【2026-09-15 新增：兼容搜索版本】
+# 豆包有两种回答形态：
+#   正常版：直接输出 markdown（md-box-root）
+#   搜索版：先有 data-thinking-box 思考卡片，卡片里也有一个小 md-box-root（引言），
+#           完整回答在 thinking-box 之后。原版 m.querySelector('.md-box-root') 会
+#           错误地命中 thinking-box 内部的小 md-box-root，导致 answer 只有引言。
+#           修复：遍历全部候选，跳过 thinking-box 内部元素，确保 body 指向完整回答。
+#           thinking 提取也优先使用明确的 data-thinking-box 容器，比启发式选择器靠谱。
 MESSAGES = r"""() => [...document.querySelectorAll('[data-message-id]')].map(m => {
   const bodySelectors=['.md-box-root','[class*="md-box-root"]','[class*="prose"]','[class*="markdown"]','[class*="answer"]','.ProseMirror','[data-message-body]'];
-  let body=null; for(const s of bodySelectors){body=m.querySelector(s);if(body&&(body.innerText||'').trim())break}
+  // === 2026-09-15 新增：先找思考卡片容器，选 body 时要跳过它内部的元素 ===
+  const thinkingBox=m.querySelector('[data-thinking-box]');
+  let body=null;
+  for(const s of bodySelectors){
+    // 对每个选择器取全部候选，逐个检查是否在 thinking-box 内部
+    const all=m.querySelectorAll(s);
+    for(const cand of all){
+      if(!(cand.innerText||'').trim())continue;
+      // 跳过 thinking-box 内部的候选（搜索版本里思考卡片内也有 md-box-root）
+      if(thinkingBox&&(thinkingBox.contains(cand)||cand===thinkingBox))continue;
+      body=cand;break;
+    }
+    if(body)break;
+  }
+  // 兜底：如果找不到非 thinking-box 内的 body（理论上不会），退回原来的 querySelector
+  if(!body){for(const s of bodySelectors){body=m.querySelector(s);if(body&&(body.innerText||'').trim())break}}
+
   const cls=m.className||'';
   const isUser=!!m.querySelector('[class*="send-msg-bubble"],[class*="user-bubble"]')||cls.includes('justify-end')||cls.includes('items-end')||!!m.querySelector('[class*="bg-"][class*="primary"]');
   if(!body||isUser)return null;
@@ -63,101 +84,187 @@ MESSAGES = r"""() => [...document.querySelectorAll('[data-message-id]')].map(m =
   const isBeforeBody=(el)=>el!==body&&!body.contains(el)&&!el.contains(body)&&(body.compareDocumentPosition(el)&Node.DOCUMENT_POSITION_FOLLOWING)===0;
   const simSame=(a,b)=>{const A=a.replace(/\s+/g,''),B=b.replace(/\s+/g,'');return A===B||(B.length>20&&A.includes(B))||(A.length>20&&B.includes(A))};
 
-  const thinkingSelectors=[
-    '[data-plugin-identifier*="block_type:10025"]',
-    '[data-plugin-identifier*="search_query_result_block"]',
-    'div.mb-8.text-sm.text-dbx-neutral-400',
-    '[class*="text-sm"][class*="neutral"]',
-    '[class*="thought"]',
-    '[class*="thinking"]',
-    'div[data-render-engine="node"]'
-  ];
+  // === 2026-09-15 新增：thinking 提取优先使用明确的 data-thinking-box 容器 ===
   let thinking='',thinkingText='';
   const thinkingNodes=[];
-  for(const s of thinkingSelectors){
-    for(const el of m.querySelectorAll(s)){
-      if(el===body||body.contains(el)||el.contains(body))continue;
-      if(!isBeforeBody(el))continue;
-      if(el.querySelector('.md-box-root,[class*="md-box-root"]'))continue;
-      if(thinkingNodes.some(n=>n.contains(el)||el.contains(n)))continue;
-      const t=clean(el.innerText);
-      if(simSame(t,answerText))continue;
-      thinkingNodes.push(el);
+  if(thinkingBox){
+    // 搜索版本：直接用 thinking-box 的内容作为 thinking
+    const t=clean(thinkingBox.innerText);
+    if(t&&!simSame(t,answerText)){
+      // 去掉标题里的"已完成思考，参考 N 篇资料"这类摘要行
+      const filtered=t.split('\n').filter(line=>!/^(?:已完成思考|已完成搜索|搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料|思考(?:已完成|过程)?)$/.test(clean(line)));
+      thinkingText=filtered.join('\n').trim();
+      thinking=stripAttrs(thinkingBox.outerHTML||thinkingBox.innerHTML||'');
+      thinkingNodes.push(thinkingBox);
+    }
+  }else{
+    // 正常版本：用启发式选择器找思考块
+    const thinkingSelectors=[
+      '[data-plugin-identifier*="block_type:10025"]',
+      '[data-plugin-identifier*="search_query_result_block"]',
+      'div.mb-8.text-sm.text-dbx-neutral-400',
+      '[class*="text-sm"][class*="neutral"]',
+      '[class*="thought"]',
+      '[class*="thinking"]',
+      'div[data-render-engine="node"]'
+    ];
+    for(const s of thinkingSelectors){
+      for(const el of m.querySelectorAll(s)){
+        if(el===body||body.contains(el)||el.contains(body))continue;
+        if(!isBeforeBody(el))continue;
+        if(el.querySelector('.md-box-root,[class*="md-box-root"]'))continue;
+        if(thinkingNodes.some(n=>n.contains(el)||el.contains(n)))continue;
+        const t=clean(el.innerText);
+        if(simSame(t,answerText))continue;
+        thinkingNodes.push(el);
+      }
+    }
+    if(thinkingNodes.length){
+      const sorted=thinkingNodes.sort((a,b)=>((a.compareDocumentPosition(b)&2)?1:-1));
+      const htmls=[],txts=[];
+      for(const el of sorted){
+        const t=clean(el.innerText);
+        if(!t||/^搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料$/.test(t)||/^思考(?:已完成|过程)?$/.test(t))continue;
+        if(txts.some(x=>simSame(x,t)))continue;
+        if(simSame(t,answerText))continue;
+        txts.push(t);
+        htmls.push(stripAttrs(el.outerHTML||el.innerHTML||''));
+      }
+      thinking=htmls.join('\n\n');
+      thinkingText=txts.join('\n\n');
+    }
+
+    let parts=[], n=body;
+    while(n&&n!==m){const p=n.parentElement;if(!p||p===m.parentElement)break;const a=[...p.children],i=a.findIndex(x=>x===body||x.contains(body));
+      if(i>0&&(p.className||'').includes('flex-col')){parts=a.slice(0,i).filter(x=>clean(x.innerText));break} n=p}
+
+    if(parts.length&&!thinking){
+      const filt=parts.filter(x=>!x.querySelector('a[data-thinking-box-tool-call="true"],a[data-tool-call-item-id*="-result-"]')&&isBeforeBody(x)&&!x.contains(body)&&!body.contains(x));
+      const txts=filt.map(x=>clean(x.innerText)).filter(t=>t&&!/^搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料$/.test(t)&&!/^思考(?:已完成|过程)?$/.test(t)&&!simSame(t,answerText));
+      const htmls=[];
+      for(const x of filt){const t=clean(x.innerText);if(txts.includes(t))htmls.push(stripAttrs(x.outerHTML||x.innerHTML||''))}
+      if(txts.length){thinking=htmls.join('\n\n');thinkingText=txts.join('\n\n')}
     }
   }
-  if(thinkingNodes.length){
-    const sorted=thinkingNodes.sort((a,b)=>((a.compareDocumentPosition(b)&2)?1:-1));
-    const htmls=[],txts=[];
-    for(const el of sorted){
-      const t=clean(el.innerText);
-      if(!t||/^搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料$/.test(t)||/^思考(?:已完成|过程)?$/.test(t))continue;
-      if(txts.some(x=>simSame(x,t)))continue;
-      if(simSame(t,answerText))continue;
-      txts.push(t);
-      htmls.push(stripAttrs(el.outerHTML||el.innerHTML||''));
-    }
-    thinking=htmls.join('\n\n');
-    thinkingText=txts.join('\n\n');
-  }
 
-  let parts=[], n=body;
-  while(n&&n!==m){const p=n.parentElement;if(!p||p===m.parentElement)break;const a=[...p.children],i=a.findIndex(x=>x===body||x.contains(body));
-    if(i>0&&(p.className||'').includes('flex-col')){parts=a.slice(0,i).filter(x=>clean(x.innerText));break} n=p}
-
-  if(parts.length&&!thinking){
-    const filt=parts.filter(x=>!x.querySelector('a[data-thinking-box-tool-call="true"],a[data-tool-call-item-id*="-result-"]')&&isBeforeBody(x)&&!x.contains(body)&&!body.contains(x));
-    const txts=filt.map(x=>clean(x.innerText)).filter(t=>t&&!/^搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料$/.test(t)&&!/^思考(?:已完成|过程)?$/.test(t)&&!simSame(t,answerText));
-    const htmls=[];
-    for(const x of filt){const t=clean(x.innerText);if(txts.includes(t))htmls.push(stripAttrs(x.outerHTML||x.innerHTML||''))}
-    if(txts.length){thinking=htmls.join('\n\n');thinkingText=txts.join('\n\n')}
-  }
-
+  // === 来源提取（两版通用） ===
   const sources=[],seen=new Set(),refs=[...m.querySelectorAll('a[href]')].filter(a=>a.dataset.thinkingBoxToolCall==='true'||(a.dataset.toolCallItemId||'').includes('-result-'));
   for(const a of refs){const raw=(a.href||'').trim(),title=clean(a.innerText||a.textContent);if(!raw||!title)continue;let u;try{u=new URL(raw,location.href).href}catch(_){continue}
     if(!/^https?:/.test(u)||u.includes('doubao.com/chat')||seen.has(u))continue;seen.add(u);sources.push({title:title.replace(/^\s*\d+\.\s*/,''),url:u})}
 
-  const sourcesCovered=new Set();
-  for(const tn of thinkingNodes){for(const a of tn.querySelectorAll('a[href]')){const raw=(a.href||'').trim();if(raw)sourcesCovered.add(raw)}}
-  const refsMissing=[...refs].filter(a=>{
-    if(!isBeforeBody(a))return false;
-    const u=(a.href||'').trim();
-    return u&&!sourcesCovered.has(u);
-  });
-  const blueNodes=refsMissing.map(a=>clean(a.innerText||a.textContent)).filter(Boolean);
-  if(blueNodes.length){
-    const uniqBlue=[];
-    for(const t of blueNodes)if(!uniqBlue.some(x=>simSame(x,t))&&!simSame(t,answerText))uniqBlue.push(t);
-    if(uniqBlue.length&&!thinkingText.split(/\s+/).join('').includes(uniqBlue.join('').split(/\s+/).join(''))){
-      const blueHtml='<div class="thinking-refs"><ul>'+uniqBlue.map(t=>`<li>${t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</li>`).join('')+'</ul></div>';
-      thinking=[thinking,blueHtml].filter(Boolean).join('\n\n');
-      thinkingText=[thinkingText,uniqBlue.join('\n')].filter(Boolean).join('\n\n');
+  if(!thinkingBox){
+    const sourcesCovered=new Set();
+    for(const tn of thinkingNodes){for(const a of tn.querySelectorAll('a[href]')){const raw=(a.href||'').trim();if(raw)sourcesCovered.add(raw)}}
+    const refsMissing=[...refs].filter(a=>{
+      if(!isBeforeBody(a))return false;
+      const u=(a.href||'').trim();
+      return u&&!sourcesCovered.has(u);
+    });
+    const blueNodes=refsMissing.map(a=>clean(a.innerText||a.textContent)).filter(Boolean);
+    if(blueNodes.length){
+      const uniqBlue=[];
+      for(const t of blueNodes)if(!uniqBlue.some(x=>simSame(x,t))&&!simSame(t,answerText))uniqBlue.push(t);
+      if(uniqBlue.length&&!thinkingText.split(/\s+/).join('').includes(uniqBlue.join('').split(/\s+/).join(''))){
+        const blueHtml='<div class="thinking-refs"><ul>'+uniqBlue.map(t=>`<li>${t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</li>`).join('')+'</ul></div>';
+        thinking=[thinking,blueHtml].filter(Boolean).join('\n\n');
+        thinkingText=[thinkingText,uniqBlue.join('\n')].filter(Boolean).join('\n\n');
+      }
     }
-  }
 
-  if(!thinking){let p=body.parentElement;while(p&&p!==m){const before=[...p.children].slice(0,[...p.children].findIndex(x=>x===body||x.contains(body)));
-    const filt=before.filter(x=>!x.querySelector('a[data-thinking-box-tool-call="true"],a[data-tool-call-item-id*="-result-"]')&&!x.contains(body));
-    const txts=filt.map(x=>clean(x.innerText)).filter(t=>t&&t!==answerText&&!simSame(t,answerText)&&!/^搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料$/.test(t));
-    const htmls=[];
-    for(const x of filt){const t=clean(x.innerText);if(txts.includes(t))htmls.push(stripAttrs(x.outerHTML||x.innerHTML||''))}
-    if(txts.length){thinking=htmls.join('\n\n');thinkingText=txts.join('\n\n');break}p=p.parentElement}}
+    if(!thinking){let p=body.parentElement;while(p&&p!==m){const before=[...p.children].slice(0,[...p.children].findIndex(x=>x===body||x.contains(body)));
+      const filt=before.filter(x=>!x.querySelector('a[data-thinking-box-tool-call="true"],a[data-tool-call-item-id*="-result-"]')&&!x.contains(body));
+      const txts=filt.map(x=>clean(x.innerText)).filter(t=>t&&t!==answerText&&!simSame(t,answerText)&&!/^搜索\s*\d+\s*个关键词.*参考\s*\d+\s*篇资料$/.test(t));
+      const htmls=[];
+      for(const x of filt){const t=clean(x.innerText);if(txts.includes(t))htmls.push(stripAttrs(x.outerHTML||x.innerHTML||''))}
+      if(txts.length){thinking=htmls.join('\n\n');thinkingText=txts.join('\n\n');break}p=p.parentElement}}
+  }
 
   const answerHtml=stripAttrs(body.outerHTML||body.innerHTML||'');
 
   return {id:m.dataset.messageId||'',answer:answerHtml,thinking,sources};
 }).filter(Boolean)"""
 
-# 注入 JS 用于「展开」折叠的思考区域：遍历消息里所有像按钮的可点击元素，找到带
-# 「思考 / 深度思考 / 搜索 N 个关键词」文案的那个点开。同样不写死具体选择器，
-# 靠文案匹配，改版后依然大概率能命中，返回实际点击次数。
+# 注入 JS 用于「展开」折叠的思考区域。
+#
+# 【2026-09-15 重写展开策略：CSS 强制展开为主，点击为备选】
+#
+# 原版 EXPAND 的思路是"找个按钮点一下"——但豆包搜索版本的 thinking-box 折叠
+# 不是页面内可展开的折叠面板，而是用 CSS（height:0 + overflow:hidden）把内容
+# 藏起来，或者点击标题弹独立的模态弹窗。这两种情况下"找 button 点"都没用。
+#
+# 新策略：
+#   1. 对搜索版本（有 data-thinking-box）：先尝试点击标题区触发展开/弹窗，
+#      然后不管成功与否，用 CSS 强制展开——把 thinking-box 内所有子元素的
+#      height/maxHeight/overflow/display 都改成可见。这招能扒出绝大多数
+#      被折叠的内容。
+#   2. 对正常版本（没有 thinking-box）：保持原来的按钮点击逻辑不变。
+#
+# 另外 body 选择同样要跳过 thinking-box 内部，避免定位错误。
 EXPAND = r"""id => {
   const clean=s=>(s||'').replace(/\s+/g,' ').trim(), m=[...document.querySelectorAll('[data-message-id]')].find(x=>x.dataset.messageId===id);
   if(!m)return 0;
+
+  // body 选择跳过 thinking-box 内部
+  const thinkingBox=m.querySelector('[data-thinking-box]');
   const bodySelectors=['.md-box-root','[class*="md-box-root"]','[class*="prose"]','[class*="markdown"]','[class*="answer"]','.ProseMirror','[data-message-body]'];
-  let body=null; for(const s of bodySelectors){body=m.querySelector(s);if(body)break}
-  if(!body)return 0; let info=null,n=body;
+  let body=null;
+  for(const s of bodySelectors){
+    const all=m.querySelectorAll(s);
+    for(const cand of all){
+      if(thinkingBox&&(thinkingBox.contains(cand)||cand===thinkingBox))continue;
+      if((cand.innerText||'').trim()){body=cand;break}
+    }
+    if(body)break;
+  }
+  if(!body){for(const s of bodySelectors){body=m.querySelector(s);if(body)break}}
+  if(!body)return 0;
+
+  let count=0;
+
+  // === 搜索版本：CSS 强制展开 thinking-box ===
+  if(thinkingBox){
+    // 步骤1：尝试点击 thinking-box 的标题区（"已完成思考，参考 N 篇资料"那行）
+    // 有时点击后会弹出详情模态窗口或者在页面内展开
+    const titleArea=thinkingBox.querySelector('[class*="title"], [class*="header"], [class*="summary"]')||thinkingBox;
+    try{titleArea.click();count++}catch(_){}
+
+    // 步骤2（关键）：CSS 强制展开——把 thinking-box 内所有折叠元素扒出来
+    // 豆包折叠内容靠的是 height:0 / maxHeight / overflow:hidden / display:none
+    // 这一把梭全部移除
+    thinkingBox.style.height='auto';
+    thinkingBox.style.maxHeight='none';
+    thinkingBox.style.overflow='visible';
+    thinkingBox.style.display='block';
+
+    const all=[...thinkingBox.querySelectorAll('*')];
+    for(const el of all){
+      const st=el.style;
+      // 清除行内样式的折叠
+      if(st.height==='0px'||st.height==='0'){st.height='auto';st.maxHeight='none'}
+      if(st.maxHeight&&st.maxHeight!=='none'&&st.maxHeight!=='auto'){st.maxHeight='none';st.height='auto'}
+      if(st.overflow==='hidden')st.overflow='visible';
+      if(st.display==='none')st.display='';
+      // 有些框架用 data 属性或属性控制折叠
+      if(el.hasAttribute&&(el.getAttribute('aria-hidden')==='true'))el.removeAttribute('aria-hidden');
+      if(el.hasAttribute&&(el.getAttribute('aria-expanded')==='false'))el.setAttribute('aria-expanded','true');
+      // 有些用 class 加 !important 控制——用 setProperty 强行覆盖
+      if(getComputedStyle(el).height==='0px'||getComputedStyle(el).height==='0'){
+        el.setProperty('height','auto','important');
+        el.setProperty('max-height','none','important');
+      }
+      const cs=getComputedStyle(el);
+      if(cs.overflow==='hidden')el.setProperty('overflow','visible','important');
+      if(cs.display==='none')el.setProperty('display','block','important');
+    }
+    count++; // 至少算一次强制展开
+    return count; // 搜索版本做完就直接返回，不走下面的正常版本逻辑
+  }
+
+  // === 正常版本（无 thinking-box）：保持原来的按钮点击逻辑 ===
+  let info=null,n=body;
   while(n&&n!==m){const p=n.parentElement;if(!p||p===m.parentElement)break;const a=[...p.children],i=a.findIndex(x=>x===body||x.contains(body));
     if(i>=0&&(p.className||'').includes('flex-col')){info={p,i};break}n=p}
-  let count=0;
+
   const clickable=[...m.querySelectorAll('button,[role="button"],[class*="cursor-pointer"],div[class*="clickable"]')];
   const thought=clickable.find(el=>{const t=clean(el.innerText);return t.length<100&&/思考|深度思考/.test(t)});
   if(thought){thought.click();count++}
@@ -577,17 +684,47 @@ def handle_unit(page, unit):
 
 
 def main():
-    """进程入口：打开浏览器、就绪后进入认领循环。
-
-    关键设计同 deepseek.py：persistent_context 持久化登录态；channel="msedge" 复用
-    系统 Edge；headless=False 有头运行便于人工登录/验证/排查。区别是这里用
-    no_viewport=True + --start-maximized 让窗口最大化，避免截图像素太小。
     """
-    log("启动豆包 Worker（认领模式，无全局锁）")
-    log("打开浏览器...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE),
+    进程入口：打开浏览器 → 就绪后进入账号池驱动的认领循环。
+
+    v2 账号池模式的变化：
+      - 不再硬编码 PROFILE 目录（edge_doubao_profile），而是从账号池借号后，
+        用账号 ID 构造独立的 profile 目录（如 edge_doubao_profiles/account_123）。
+      - 一个账号用完 BATCH_SIZE（默认10）个问题后，run_worker_loop 会自动
+        关闭当前浏览器、释放账号、借下一个、打开新 profile 的浏览器。
+      - 第一次用某个账号的 profile 时，ready() 会让用户手动登录一次；
+        之后 cookie 持久化在 profile 目录里，自动复用。
+    """
+    log("启动豆包 Worker（账号池模式）")
+    log("注意：第一次使用某个账号时，需要在浏览器里手动登录一次，之后 cookie 会自动复用")
+
+    # ========== 这些状态变量会被 run_worker_loop 通过 worker_context 控制 ==========
+    playwright_instance = None      # Playwright 实例（换号时要关掉旧的）
+    browser = None                  # 当前浏览器实例
+    page = None                     # 当前 page
+
+    PROFILE_BASE = str(BASE_DIR / "edge_doubao_profiles")  # 所有账号的 profile 放这
+    os.makedirs(PROFILE_BASE, exist_ok=True)
+
+    def _open_browser(profile_dir):
+        """打开指定 profile 目录的浏览器。换号时会被调用。"""
+        nonlocal playwright_instance, browser, page
+        # 先确保旧的浏览器关了
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        if playwright_instance is not None:
+            try:
+                playwright_instance.stop()
+            except Exception:
+                pass
+
+        log(f"打开浏览器，profile 目录: {profile_dir}")
+        playwright_instance = sync_playwright().start()
+        browser = playwright_instance.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
             channel="msedge",
             headless=False,
             no_viewport=True,
@@ -600,7 +737,7 @@ def main():
             ]
         )
 
-        # 注入反检测脚本：覆盖常见自动化探测点。
+        # 注入反检测脚本（同旧版）
         browser.add_init_script(
             """
             () => {
@@ -610,12 +747,9 @@ def main():
                 });
                 window.chrome = window.chrome || {};
                 window.chrome.runtime = window.chrome.runtime || {
-                    OnInstalledReason: {},
-                    OnRestartRequiredReason: {},
-                    PlatformArch: {},
-                    PlatformNaclArch: {},
-                    PlatformOs: {},
-                    RequestUpdateCheckStatus: {}
+                    OnInstalledReason: {}, OnRestartRequiredReason: {},
+                    PlatformArch: {}, PlatformNaclArch: {},
+                    PlatformOs: {}, RequestUpdateCheckStatus: {}
                 };
                 Object.defineProperty(navigator, 'languages', {
                     get: () => ['zh-CN', 'zh', 'en-US', 'en'],
@@ -631,13 +765,6 @@ def main():
                         ? Promise.resolve({ state: Notification.permission })
                         : originalQuery(parameters)
                 );
-                const originalToString = Function.prototype.toString;
-                Function.prototype.toString = function() {
-                    if (this === window.navigator.permissions.query) {
-                        return 'function query() { [native code] }';
-                    }
-                    return originalToString.call(this);
-                };
             }
             """
         )
@@ -651,17 +778,47 @@ def main():
         log("豆包已打开")
         human_wait(2, 5)
 
+        # 等用户确认登录完成（第一次用新 profile 时一定要手动登录！）
         ready(page)
-        log("已登录")
+        log("已登录，可以开始工作了")
         human_wait(1, 3)
 
-        log("开始从任务池认领单元...")
-        try:
-            run_worker_loop(PLATFORM_NAME, page, handle_unit)
-        except KeyboardInterrupt:
-            log("收到中断信号，退出")
-        finally:
-            browser.close()
+    def _close_browser():
+        """关闭当前浏览器。换号/退出时会被调用。"""
+        nonlocal playwright_instance, browser, page
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception as e:
+                log(f"关闭浏览器异常: {e}")
+            browser = None
+        if playwright_instance is not None:
+            try:
+                playwright_instance.stop()
+            except Exception as e:
+                log(f"停止 playwright 异常: {e}")
+            playwright_instance = None
+        page = None
+
+    def _get_page():
+        """供 run_worker_loop 获取当前 page 对象。"""
+        return page
+
+    # ========== 组装 worker_context 并启动 ==========
+    worker_context = {
+        "get_page": _get_page,
+        "open_profile": _open_browser,
+        "close_browser": _close_browser,
+        "profile_base_dir": PROFILE_BASE,
+    }
+
+    log("开始进入账号池循环...")
+    try:
+        run_worker_loop(PLATFORM_NAME, worker_context, handle_unit)
+    except KeyboardInterrupt:
+        log("收到中断信号，退出")
+    finally:
+        _close_browser()
 
 
 if __name__ == "__main__":

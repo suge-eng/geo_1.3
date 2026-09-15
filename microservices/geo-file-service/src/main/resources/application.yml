@@ -32,3 +32,14 @@ minio:
 logging:
   level:
     com.geo: DEBUG
+
+# ===== Knife4j / SpringDoc API 文档 =====
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

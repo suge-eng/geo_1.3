@@ -2,7 +2,7 @@
 server:
   address: 0.0.0.0            # 监听所有网卡
   port: 8080                  # 本服务端口（网关是对外唯一入口，固定 8080）
-  connection-timeout: 600s    # 连接建立超时：10 分钟
+  #connection-timeout: 600s    # 连接建立超时：10 分钟
   forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头
   compression:
     enabled: true             # 开启 HTTP 响应压缩
@@ -65,3 +65,14 @@ spring:
 logging:
   level:
     com.geo: DEBUG
+
+# ===== Knife4j / SpringDoc API 文档 =====
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

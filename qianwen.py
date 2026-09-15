@@ -892,19 +892,36 @@ def handle_unit(page, unit):
 
 
 def main():
-    # 入口：启动浏览器 -> 登录 -> 进入认领循环。
-    # launch_persistent_context + user_data_dir 持久化登录态。
-    #
-    # 反检测启动参数说明（重要）：
-    #   --disable-blink-features=AutomationControlled：隐藏 blink 层自动化标志。
-    #   【已移除】--no-sandbox / --disable-setuid-sandbox：这两个参数会在页面顶部
-    #     弹出黄色警告条"你使用的是不受支持的命令行标志"，是最显眼的自动化特征，
-    #     必须去掉。Windows 上不需要 sandbox 相关参数。
-    log("启动 Qianwen Worker（认领模式，无全局锁）")
-    log("打开浏览器...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE),
+    """Qianwen Worker 进程入口（账号池模式）。
+
+    改动点（相比旧版）：
+      - 不再硬编码 PROFILE，而是账号池借号后按 account_id 建独立 profile 目录
+      - run_worker_loop 从 (platform, page, handle_unit) 改为 (platform, worker_context, handle_unit)
+      - 一个账号跑满 BATCH_SIZE（默认10）个问题后，自动关浏览器、释放账号、借下一个
+    """
+    log("启动 Qianwen Worker（账号池模式）")
+    log("注意：第一次使用某个账号时，需要在浏览器里手动登录一次，之后 cookie 会自动复用")
+
+    playwright_instance = None
+    browser = None
+    page = None
+
+    PROFILE_BASE = str(BASE_DIR / "edge_profiles")  # 所有账号的 profile 放这
+    os.makedirs(PROFILE_BASE, exist_ok=True)
+
+    def _open_browser(profile_dir):
+        nonlocal playwright_instance, browser, page
+        if browser is not None:
+            try: browser.close()
+            except Exception: pass
+        if playwright_instance is not None:
+            try: playwright_instance.stop()
+            except Exception: pass
+
+        log(f"打开浏览器，profile 目录: {profile_dir}")
+        playwright_instance = sync_playwright().start()
+        browser = playwright_instance.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
             channel="msedge",
             headless=False,
             no_viewport=True,
@@ -916,78 +933,58 @@ def main():
                 "--disable-features=IsolateOrigins,site-per-process"
             ]
         )
-
-        # 注入反检测脚本：在每个页面 document 创建前执行，覆盖常见的自动化探测点。
-        # 这些属性如果暴露真实值，千问前端 JS 能直接判定为机器人并拒绝回答。
         browser.add_init_script(
             """
             () => {
-                // 1. navigator.webdriver 必须是 undefined
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                    configurable: true
-                });
-
-                // 2. 补上 window.chrome 对象（自动化浏览器通常缺失）
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
                 window.chrome = window.chrome || {};
-                window.chrome.runtime = window.chrome.runtime || {
-                    OnInstalledReason: {},
-                    OnRestartRequiredReason: {},
-                    PlatformArch: {},
-                    PlatformNaclArch: {},
-                    PlatformOs: {},
-                    RequestUpdateCheckStatus: {}
-                };
-
-                // 3. 修正 languages（自动化环境常是空数组）
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
-                    configurable: true
-                });
-
-                // 4. 修正 plugins 长度（0 是典型机器人特征）
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5],
-                    configurable: true
-                });
-
-                // 5. permissions.query 对 notifications 返回正确状态
+                window.chrome.runtime = window.chrome.runtime || { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'], configurable: true });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });
                 const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({ state: Notification.permission })
-                        : originalQuery(parameters)
-                );
-
-                // 6. 覆盖 toString，防止 Function.prototype.toString 检测
+                window.navigator.permissions.query = (parameters) => (parameters.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : originalQuery(parameters));
                 const originalToString = Function.prototype.toString;
-                Function.prototype.toString = function() {
-                    if (this === window.navigator.permissions.query) {
-                        return 'function query() { [native code] }';
-                    }
-                    return originalToString.call(this);
-                };
+                Function.prototype.toString = function() { if (this === window.navigator.permissions.query) return 'function query() { [native code] }'; return originalToString.call(this); };
             }
             """
         )
-
         page = browser.pages[0] if browser.pages else browser.new_page()
-
         page.goto(QWEN_URL, wait_until="domcontentloaded")
         log("千问已打开")
         time.sleep(random.uniform(2, 5))
-
         ready(page)
+        log("已登录")
+        human_wait(1, 3)
 
-        # run_worker_loop 是 worker_lib.py 提供的公共循环：反复认领单元 -> handle_unit
-        # 处理 -> 回调 -> 再认领，认领/心跳/回调的并发安全都在后端。
-        log("开始从任务池认领单元...")
-        try:
-            run_worker_loop("qianwen", page, handle_unit)
-        except KeyboardInterrupt:
-            log("收到中断信号，退出")
-        finally:
-            browser.close()
+    def _close_browser():
+        nonlocal playwright_instance, browser, page
+        if browser is not None:
+            try: browser.close()
+            except Exception as e: log(f"关闭浏览器异常: {e}")
+            browser = None
+        if playwright_instance is not None:
+            try: playwright_instance.stop()
+            except Exception as e: log(f"停止 playwright 异常: {e}")
+            playwright_instance = None
+        page = None
+
+    def _get_page():
+        return page
+
+    worker_context = {
+        "get_page": _get_page,
+        "open_profile": _open_browser,
+        "close_browser": _close_browser,
+        "profile_base_dir": PROFILE_BASE,
+    }
+
+    log("开始进入账号池循环...")
+    try:
+        run_worker_loop("qianwen", worker_context, handle_unit)
+    except KeyboardInterrupt:
+        log("收到中断信号，退出")
+    finally:
+        _close_browser()
 
 
 if __name__ == "__main__":

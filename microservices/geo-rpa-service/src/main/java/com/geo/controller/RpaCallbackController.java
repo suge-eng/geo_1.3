@@ -1,9 +1,10 @@
 package com.geo.controller;
 
 import com.geo.common.Result;
+import com.geo.entity.TaskResult;
+import com.geo.service.AccountPoolService;
 import com.geo.service.MinioService;
 import com.geo.service.RpaWorkerDispatcherService;
-import com.geo.entity.TaskResult;
 import com.geo.enums.AiPlatform;
 import com.geo.enums.ResultStatus;
 import com.geo.mapper.TaskResultMapper;
@@ -43,16 +44,19 @@ public class RpaCallbackController {
     private final MinioService minioService;
     private final TaskResultMapper taskResultMapper;
     private final RpaWorkerDispatcherService dispatcher;
+    private final AccountPoolService accountPoolService;
     private final ObjectMapper objectMapper;
 
     public RpaCallbackController(RestTemplate restTemplate, MinioService minioService,
                                   TaskResultMapper taskResultMapper,
                                   RpaWorkerDispatcherService dispatcher,
+                                  AccountPoolService accountPoolService,
                                   ObjectMapper objectMapper) {
         this.restTemplate = restTemplate;
         this.minioService = minioService;
         this.taskResultMapper = taskResultMapper;
         this.dispatcher = dispatcher;
+        this.accountPoolService = accountPoolService;
         this.objectMapper = objectMapper;
     }
 
@@ -289,6 +293,20 @@ public class RpaCallbackController {
         // 终态时释放该单元的租约：单元已达终态，不再需要心跳/回收，交给 Dispatcher.finish 清理租约字段。
         if (terminal) {
             dispatcher.finish(targetResult.getId());
+
+            // ========== 新增：如果这个单元是用某个 AI 账号执行的，更新账号池状态 ==========
+            Long accountId = targetResult.getAccountId();
+            if (accountId != null) {
+                String workerId = targetResult.getAssignee();
+                boolean success = ResultStatus.SUCCESS.name().equalsIgnoreCase(status);
+                try {
+                    accountPoolService.incrementAfterUse(accountId, workerId, success);
+                    log.info("账号池更新: accountId={}, workerId={}, 状态={}, 批次计数+1", accountId, workerId, success ? "成功" : "失败");
+                } catch (Exception e) {
+                    // 账号池更新失败不影响主流程，单元结果已经存好了
+                    log.warn("账号池更新失败（不影响任务结果）: accountId={}, err={}", accountId, e.getMessage());
+                }
+            }
         }
 
         log.info("任务结果更新成功: id={}, questionText={}, status={}, screenshotUrls={}",

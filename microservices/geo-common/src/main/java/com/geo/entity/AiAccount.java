@@ -58,6 +58,16 @@ public class AiAccount {
     // 优先级：数字越小越优先被选中使用（1最优先）
     private Integer priority;
 
+    // ========== worker 绑定相关字段（新增） ==========
+    // 当前占用该账号的 worker 标识（机器名），为空表示空闲可分配。
+    // 防止多个 worker 同时抢同一个账号。
+    private String workerId;
+    // 当前批次已处理的问题数量：worker 借到账号后，每处理完一个 +1，
+    // 达到 BATCH_SIZE（如10）后自动释放账号重新借下一个。
+    private Integer batchCount;
+    // 账号被借走的时间戳（用于统计/诊断）
+    private LocalDateTime borrowedAt;
+
     // 创建时间，自动填充
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
@@ -94,6 +104,12 @@ public class AiAccount {
     public void setMaxConsecutiveFailures(Integer maxConsecutiveFailures) { this.maxConsecutiveFailures = maxConsecutiveFailures; }
     public Integer getPriority() { return priority; }
     public void setPriority(Integer priority) { this.priority = priority; }
+    public String getWorkerId() { return workerId; }
+    public void setWorkerId(String workerId) { this.workerId = workerId; }
+    public Integer getBatchCount() { return batchCount; }
+    public void setBatchCount(Integer batchCount) { this.batchCount = batchCount; }
+    public LocalDateTime getBorrowedAt() { return borrowedAt; }
+    public void setBorrowedAt(LocalDateTime borrowedAt) { this.borrowedAt = borrowedAt; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

@@ -11,16 +11,29 @@
         ORDER BY priority DESC, daily_used ASC
     </select>
 
-    <!-- 挑选“最优”单个账号（认领任务时分配）：除可用条件外，还要求未超当日限额、连续失败未达上限；按优先级→今日已用→最近使用时间排序，只取 1 个 -->
+    <!-- 挑选"最优"单个账号（认领任务时分配）：除可用条件外，还要求未超当日限额、连续失败未达上限；daily_limit<=0 表示无限 -->
     <select id="selectBestAccount" resultType="com.geo.entity.AiAccount">
         SELECT * FROM ai_account 
         WHERE platform = #{platform} 
           AND status = 'ACTIVE' 
           AND (cooldown_until IS NULL OR cooldown_until &lt; NOW())
-          AND daily_used &lt; daily_limit
+          AND (daily_limit IS NULL OR daily_limit &lt;= 0 OR daily_used &lt; daily_limit)
           AND consecutive_failures &lt; max_consecutive_failures
         ORDER BY priority DESC, daily_used ASC, last_request_at ASC
         LIMIT 1
+    </select>
+
+    <!-- 【worker 账号分配】挑一个空闲（worker_id IS NULL）的可用账号。daily_limit<=0 表示无限 -->
+    <select id="selectIdleAccountForWorker" resultType="com.geo.entity.AiAccount">
+        SELECT * FROM ai_account
+        WHERE platform = #{platform}
+          AND status = 'ACTIVE'
+          AND worker_id IS NULL
+          AND (cooldown_until IS NULL OR cooldown_until &lt; NOW())
+          AND (daily_limit IS NULL OR daily_limit &lt;= 0 OR daily_used &lt; daily_limit)
+          AND consecutive_failures &lt; max_consecutive_failures
+        ORDER BY priority DESC, daily_used ASC, RAND()
+        LIMIT 5
     </select>
 
 </mapper>

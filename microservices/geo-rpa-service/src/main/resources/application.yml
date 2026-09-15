@@ -2,7 +2,7 @@
 server:
   address: 0.0.0.0            # 监听所有网卡
   port: 8084                  # 本服务端口（RPA 服务固定 8084）
-  connection-timeout: 600s    # 连接建立超时：10 分钟
+  #connection-timeout: 600s    # 连接建立超时：10 分钟
   forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头
   compression:
     enabled: true             # 开启 HTTP 响应压缩
@@ -113,3 +113,14 @@ geo:
       stuck-minutes: 5
       # 邮件收件人（可多个，逗号分隔）
       to: "1926491659@qq.com"
+
+# ===== Knife4j / SpringDoc API 文档 =====
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

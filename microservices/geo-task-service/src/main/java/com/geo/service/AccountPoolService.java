@@ -95,7 +95,9 @@ public class AccountPoolService {
         }
 
         // 第3层：今日使用量超上限 → 标记EXHAUSTED，明天自动好
-        if (account.getDailyUsed() >= account.getDailyLimit()) {
+        // 注意：daily_limit <= 0 或 null 表示无限额度，跳过此检查
+        Integer dailyLimit = account.getDailyLimit();
+        if (dailyLimit != null && dailyLimit > 0 && account.getDailyUsed() >= dailyLimit) {
             updateAccountStatus(account.getId(), AccountStatus.EXHAUSTED.name(), LocalDateTime.now().plusDays(1));
             return false;
         }

@@ -2,7 +2,7 @@
 server:
   address: 0.0.0.0            # 监听所有网卡，允许外部访问
   port: 8081                  # 本服务端口（任务服务固定 8081）
-  connection-timeout: 600s    # 连接建立超时：10 分钟
+  #connection-timeout: 600s    # 连接建立超时：10 分钟
   forward-headers-strategy: framework  # 信任反向代理传来的 X-Forwarded-* 头，以获取真实客户端 IP
   compression:
     enabled: true             # 开启 HTTP 响应压缩，节省带宽
@@ -24,7 +24,7 @@ spring:
 
   # ----- 数据库（MySQL）连接 -----
   datasource:
-    # JDBC 连接串：localhost:3307 的 geo_backend 库，附带字符集/时区/SSL 等参数
+    # JDBC 连接串：localhost:3306 的 geo_backend 库，附带字符集/时区/SSL 等参数
     url: jdbc:mysql://localhost:3307/geo_backend?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
     username: geo             # 数据库账号
     password: geo123          # 数据库密码
@@ -69,3 +69,14 @@ geo:
 logging:
   level:
     com.geo: DEBUG   # 本项目代码统一输出 DEBUG 级日志
+
+# ===== Knife4j / SpringDoc API 文档 =====
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

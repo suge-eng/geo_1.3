@@ -62,3 +62,5 @@ edge_profile/
 # Screenshots (runtime output)
 *_screenshots/
 screenshots/
+edge_doubao_profiles/
+*.apk
