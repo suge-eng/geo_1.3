@@ -112,17 +112,23 @@ public class InternalWorkerController {
     /**
      * 释放账号。worker 用完 N 个问题后（或遇到风控想主动换号时）调用。
      *
-     * 请求体: {"accountId":123, "workerId":"DESKTOP-ABC"}
+     * 请求体: {"accountId":123, "workerId":"DESKTOP-ABC", "reason":"BATCH_DONE"}
+     *
+     * reason 可选值：
+     *   - "BATCH_DONE"（默认）：正常批次完成 → 后端自动冷却 10 分钟
+     *   - "MANUAL_EXIT"：用户手动 Ctrl+C 退出 → 只清绑定，不冷却
      */
     @PostMapping("/release-account")
     public Result<Boolean> releaseAccount(@RequestBody Map<String, Object> body) {
         Long accountId = body.get("accountId") != null ? ((Number) body.get("accountId")).longValue() : null;
         String workerId = body.get("workerId") != null ? body.get("workerId").toString() : "unknown";
+        // 新增：解析 reason，默认 BATCH_DONE（冷却），MANUAL_EXIT 表示手动退出不冷却
+        String reason = body.get("reason") != null ? body.get("reason").toString() : "BATCH_DONE";
 
         if (accountId == null) {
             return Result.fail(400, "accountId 不能为空");
         }
-        boolean ok = accountPoolService.releaseAccount(accountId, workerId);
+        boolean ok = accountPoolService.releaseAccount(accountId, workerId, reason);
         return Result.success(ok);
     }
 
@@ -143,6 +149,37 @@ public class InternalWorkerController {
         }
         accountPoolService.markAccountCooldown(accountId, workerId, minutes);
         return Result.success("账号已标记冷却 " + minutes + " 分钟");
+    }
+
+    /**
+     * 上传账号 cookie（跨机器登录态复用）。
+     *
+     * 场景：电脑 A 登录了账号1，cookie 有效。电脑 B 启动时借到账号1，
+     * 后端把 A 上传的 cookie 随 acquire-account 返回值一起下发，B 直接导入浏览器即可免登录。
+     * B 自己登录/刷新后也会调这个接口更新 cookie，保持最新。
+     * login_profile.py 手动登录完也会调这个接口，让 cookie 立刻在后端生效。
+     *
+     * 请求体: {"accountId":123, "workerId":"DESKTOP-ABC", "cookie":"[{...}, {...}]"}
+     *   workerId 只是用于日志追踪，cookie 属于账号本身，不做 worker 归属校验。
+     *   cookie 是 Playwright context.cookies() 导出的 JSON 字符串。
+     */
+    @PostMapping("/upload-cookie")
+    public Result<Boolean> uploadCookie(@RequestBody Map<String, Object> body) {
+        Long accountId = body.get("accountId") != null ? ((Number) body.get("accountId")).longValue() : null;
+        String cookie = body.get("cookie") != null ? body.get("cookie").toString() : "";
+
+        if (accountId == null) {
+            return Result.fail(400, "accountId 不能为空");
+        }
+        if (cookie.isEmpty()) {
+            return Result.fail(400, "cookie 不能为空");
+        }
+
+        boolean ok = accountPoolService.uploadCookie(accountId, cookie);
+        if (!ok) {
+            return Result.fail(404, "cookie 上传失败：账号 " + accountId + " 可能不存在");
+        }
+        return Result.success(true);
     }
 
     // ==================== 3. 心跳 & 中止 ====================

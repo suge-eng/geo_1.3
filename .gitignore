@@ -64,3 +64,6 @@ edge_profile/
 screenshots/
 edge_doubao_profiles/
 *.apk
+
+# Node.js
+node_modules/

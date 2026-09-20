@@ -17,6 +17,7 @@ v2 更新：完整集成账号池调度！
   BATCH_SIZE           每个账号连跑多少个问题后自动换号（默认 10）
   ACQUIRE_ACCOUNT_SLEEP 借不到账号时的等待间隔秒数（默认 15，因为要等账号冷却）
 """
+import json
 import os
 import socket
 import threading
@@ -92,8 +93,56 @@ def upload_screenshot(local_path, task_id=None):
     except Exception as e:
         _log(f"上传异常: {e}")
         return None
+# =====================================================================
+#  完整登录态导出/导入（跨机器复用 cookie + localStorage + sessionStorage）
+# =====================================================================
 
+STATE_FILE_NAME = "state.json"
 
+def export_state(context, profile_dir):
+    """
+    把浏览器上下文的完整登录态（cookie + localStorage + sessionStorage）以 JSON 明文导出到 profile 目录。
+    使用 Playwright 的 context.storage_state() 一次性拿全，避免"只有 cookie 没有 localStorage"导致登录失效。
+    """
+    state_file = os.path.join(profile_dir, STATE_FILE_NAME)
+    try:
+        state = context.storage_state()
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        cookie_count = len(state.get("cookies", []))
+        origin_count = len(state.get("origins", []))
+        ls_total = sum(len(o.get("localStorage", [])) for o in state.get("origins", []))
+        _log(f"已导出 state: {cookie_count} cookies, {ls_total} localStorage entries → {state_file}")
+        return state_file
+    except Exception as e:
+        _log(f"导出 state 失败（不影响本次工作）: {e}")
+        return None
+
+def import_state(context, profile_dir):
+    """
+    从 profile 目录的 state.json 导入完整登录态（cookie + localStorage + sessionStorage）到浏览器上下文。
+    """
+    state_file = os.path.join(profile_dir, STATE_FILE_NAME)
+    if not os.path.exists(state_file):
+        return 0, 0
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        cookie_count = len(state.get("cookies", []))
+        ls_total = sum(len(o.get("localStorage", [])) for o in state.get("origins", []))
+        context.add_cookies(state.get("cookies", []))
+        for origin_entry in state.get("origins", []):
+            origin = origin_entry.get("origin", "")
+            for item in origin_entry.get("localStorage", []):
+                try:
+                    context.add_init_script(f"localStorage.setItem({json.dumps(item['name'])}, {json.dumps(item['value'])});", )
+                except Exception:
+                    pass
+        _log(f"已从 state.json 导入 {cookie_count} cookies + {ls_total} localStorage entries")
+        return cookie_count, ls_total
+    except Exception as e:
+        _log(f"导入 state 失败（可忽略，后续会手动登录重新导出）: {e}")
+        return 0, 0
 # =====================================================================
 #  账号池接口（新增！worker 不再硬编码浏览器 profile，每次启动先从账号池借）
 # =====================================================================
@@ -114,11 +163,18 @@ def acquire_account(platform_code, worker_id):
     return None
 
 
-def release_account(account_id, worker_id):
-    """释放账号（用完后主动归还）。"""
+def release_account(account_id, worker_id, reason="BATCH_DONE"):
+    """
+    释放账号（用完后主动归还）。
+
+    reason 控制后端行为：
+      - "BATCH_DONE"（默认）：正常批次完成 → 后端自动冷却账号 10 分钟
+      - "MANUAL_EXIT"：用户手动 Ctrl+C 退出 → 只清 worker 绑定，不冷却（账号立即可被其他 worker 借）
+      - "ERROR_CHANGE"：跑崩了/遇到风控主动换号 → 后端自动冷却（等同 BATCH_DONE）
+    """
     _post(
         RPA_SERVICE_URL + "/internal/rpa/worker/release-account",
-        {"accountId": account_id, "workerId": worker_id},
+        {"accountId": account_id, "workerId": worker_id, "reason": reason},
         timeout=15,
     )
 
@@ -130,6 +186,27 @@ def cooldown_account(account_id, worker_id, minutes=10):
         {"accountId": account_id, "workerId": worker_id, "minutes": minutes},
         timeout=15,
     )
+
+
+def upload_account_cookies(account_id, worker_id, cookies_json):
+    """
+    把当前浏览器的 cookies 上传到后端账号记录。
+    这样其他 worker 借到同一个账号时，后端会把 cookie 随 account dict 下发，
+    免手动登录。
+    """
+    if not cookies_json:
+        return False
+    obj = _post(
+        RPA_SERVICE_URL + "/internal/rpa/worker/upload-cookie",
+        {"accountId": account_id, "workerId": worker_id, "cookie": cookies_json},
+        timeout=15,
+    )
+    ok = bool(obj and obj.get("code") == 200)
+    if ok:
+        _log(f"已把账号 {account_id} 的 cookies 上传到后端")
+    else:
+        _log(f"上传 cookies 到后端失败（不影响本次工作）: {obj}")
+    return ok
 
 
 # =====================================================================
@@ -254,10 +331,36 @@ def run_worker_loop(platform_code, worker_context, handle_unit, worker_id=None):
                 )
                 os.makedirs(current_profile_dir, exist_ok=True)
                 _log(f"成功借到账号: id={account_id}, name={account.get('accountName', '')}, profile={current_profile_dir}")
+
+                # ===== 诊断：看看后端到底有没有下发 storage_state =====
+                _diag_state = account.get("cookie")
+                if _diag_state:
+                    _diag_cookie_count = _diag_state.count('"name"') if isinstance(_diag_state, str) else "?"
+                    _diag_len = len(str(_diag_state))
+                    _log(f"[诊断] 后端 storage_state 长度={_diag_len}, 约 {_diag_cookie_count} 条 cookie, 前80字符={str(_diag_state)[:80]}")
+                else:
+                    _log(f"[诊断] 后端 cookie 为 {repr(_diag_state)}（空/None）—— 该账号还没上传过登录态")
+
+                # ===== 跨机器登录态复用：后端下发的 storage_state 无条件写本地 state.json =====
+                # 后端存的是 Playwright storage_state 格式（cookie + localStorage + sessionStorage），
+                # 直接写 state.json，doubao.py new_context(storage_state=state.json) 自动全注入。
+                remote_state_str = account.get("cookie") or ""
+                if remote_state_str:
+                    local_state_path = os.path.join(current_profile_dir, STATE_FILE_NAME)
+                    try:
+                        state_obj = json.loads(remote_state_str) if isinstance(remote_state_str, str) else remote_state_str
+                        with open(local_state_path, "w", encoding="utf-8") as f:
+                            json.dump(state_obj, f, ensure_ascii=False, indent=2)
+                        _cookie_n = len(state_obj.get("cookies", []))
+                        _ls_n = sum(len(o.get("localStorage", [])) for o in state_obj.get("origins", []))
+                        _log(f"已从后端拉取账号 {account_id} 的 state（{_cookie_n} cookies + {_ls_n} localStorage），写入本地 state.json（免登录！）")
+                    except Exception as e:
+                        _log(f"后端 state 解析失败，回退到手动登录: {e}")
+
                 # 让 worker 打开这个 profile 的浏览器
                 if "open_profile" in worker_context:
                     try:
-                        worker_context["open_profile"](current_profile_dir)
+                        worker_context["open_profile"](current_profile_dir, account_id=account_id, worker_id=worker_id)
                         _log(f"浏览器已打开账号 {account_id} 的 profile")
                     except Exception as e:
                         _log(f"打开浏览器 profile 失败: {e}")
@@ -266,12 +369,20 @@ def run_worker_loop(platform_code, worker_context, handle_unit, worker_id=None):
             time.sleep(ACQUIRE_ACCOUNT_SLEEP)
 
     def _release_current_account(reason="正常用完"):
-        """释放当前账号。"""
+        """
+        释放当前账号。
+
+        reason 到后端 reason 的映射：
+          - "worker 手动退出" → MANUAL_EXIT（不冷却）
+          - 其他（"正常用完" / "批次完成" / "run_unit 异常换号"）→ BATCH_DONE（冷却）
+        """
         nonlocal current_account, current_profile_dir
         if current_account is not None:
+            # 把中文 reason 映射成后端能识别的英文 reason
+            backend_reason = "MANUAL_EXIT" if reason == "worker 手动退出" else "BATCH_DONE"
             try:
-                release_account(current_account["id"], worker_id)
-                _log(f"已释放账号: id={current_account['id']}, 原因={reason}")
+                release_account(current_account["id"], worker_id, reason=backend_reason)
+                _log(f"已释放账号: id={current_account['id']}, 原因={reason} (后端reason={backend_reason})")
             except Exception as e:
                 _log(f"释放账号异常（不影响主流程）: {e}")
             current_account = None

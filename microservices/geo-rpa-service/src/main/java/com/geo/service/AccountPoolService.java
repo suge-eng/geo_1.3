@@ -53,7 +53,7 @@ public class AccountPoolService {
     private static final int DEFAULT_COOLDOWN_MINUTES = 10;
 
     /** 账号被 worker 持有超过这个时间且该 worker 没 RUNNING 单元 → 释放 */
-    private static final long OFFLINE_CLEANUP_MINUTES = 30;
+    private static final long OFFLINE_CLEANUP_MINUTES = 10;
 
     private final AiAccountMapper aiAccountMapper;
     private final TaskResultMapper taskResultMapper;
@@ -108,19 +108,30 @@ public class AccountPoolService {
      * 只有持有该账号的 worker 才能释放（WHERE worker_id = #{workerId}）。
      *
      * 设计思路：
-     *   批次完成后释放账号 → 立即设置 DEFAULT_COOLDOWN_MINUTES（10分钟）冷却，
+     *   默认（BATCH_DONE）：释放后立即冷却 DEFAULT_COOLDOWN_MINUTES（10分钟），
      *   防止账号刚释放又被同一个/另一个 worker 立刻借回继续用，
      *   让账号有"呼吸时间"，降低被 AI 平台风控/限流的概率。
      *
+     *   MANUAL_EXIT（用户 Ctrl+C 手动退出）：只清 worker 绑定，不冷却。
+     *   账号立即可被其他 worker 借，适用于"只是想停一下不想让账号等"的场景。
+     *
      *   冷却机制：cooldown_until = NOW() + 10min，状态改为 MAINTENANCE。
      *   定时任务 autoRecoverExpiredCooldown 每 30 秒扫一次，到期自动恢复为 ACTIVE。
-     *
-     *   注意：这里故意不区分"批次完成"和"换号继续跑"——正常释放一律冷却，
-     *   如果未来需要区分（比如换同平台另一个账号不该冷却），可以加 releaseReason 参数。
      */
     @Transactional
-    public boolean releaseAccount(Long accountId, String workerId) {
-        // 一次原子操作完成「释放绑定 + 置冷却」，防止两步之间的清扫器回收造成冷却被静默跳过
+    public boolean releaseAccount(Long accountId, String workerId, String reason) {
+        // MANUAL_EXIT：手动退出，只清绑定不冷却
+        if ("MANUAL_EXIT".equals(reason)) {
+            int released = aiAccountMapper.releaseByWorker(accountId, workerId);
+            if (released > 0) {
+                log.info("worker[{}] 手动退出，释放账号（不冷却）: accountId={}", workerId, accountId);
+                return true;
+            }
+            log.warn("worker[{}] 手动退出释放账号失败（可能已被回收或不属于该 worker）: accountId={}", workerId, accountId);
+            return false;
+        }
+
+        // BATCH_DONE（默认）：正常批次完成，原子释放 + 冷却
         int released = aiAccountMapper.releaseAndCooldownAccount(accountId, workerId, DEFAULT_COOLDOWN_MINUTES);
         if (released > 0) {
             log.info("worker[{}] 成功释放账号并设置 {} 分钟冷却: accountId={}",
@@ -214,6 +225,25 @@ public class AccountPoolService {
                 updateAccountStatus(accountId, AccountStatus.MAINTENANCE.name(), LocalDateTime.now().plusHours(1));
             }
         }
+    }
+
+    /**
+     * 上传 cookie（worker 跑完一轮刷新 cookie，或 login_profile.py 手动登录后上传）。
+     * 只按 accountId 更新——cookie 属于账号本身，谁上传都行（谁的更新谁的最新）。
+     */
+    @Transactional
+    public boolean uploadCookie(Long accountId, String cookie) {
+        if (accountId == null || cookie == null || cookie.isEmpty()) {
+            log.warn("uploadCookie 参数不合法: accountId={}, cookieLen={}", accountId, cookie == null ? 0 : cookie.length());
+            return false;
+        }
+        int affected = aiAccountMapper.updateCookie(accountId, cookie);
+        if (affected > 0) {
+            log.info("成功上传账号 cookie: accountId={}, cookieLen={}", accountId, cookie.length());
+            return true;
+        }
+        log.warn("上传 cookie 失败：accountId={} 可能不存在", accountId);
+        return false;
     }
 
     /** 私有工具方法 */

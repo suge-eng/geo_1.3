@@ -31,6 +31,9 @@ from worker_lib import (
     upload_screenshot as worker_upload,
     run_worker_loop,
     callback as worker_callback,
+    import_state,
+    export_state,
+    upload_account_cookies,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -41,7 +44,6 @@ PLATFORM_NAME = "doubao"
 
 URL = "https://www.doubao.com/chat?channel=xiazai"
 PLACEHOLDER = "发消息或按住空格说话..."
-
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
 # 一段注入到页面的 JS，作用是把「一个 AI 回答消息块」拆解成结构化的三部分：
@@ -700,19 +702,25 @@ def main():
 
     # ========== 这些状态变量会被 run_worker_loop 通过 worker_context 控制 ==========
     playwright_instance = None      # Playwright 实例（换号时要关掉旧的）
-    browser = None                  # 当前浏览器实例
+    _pw_browser = None             # playwright.chromium.launch() 返回的 Browser 对象
+    browser = None                  # 当前 BrowserContext（_pw_browser.new_context() 返回）
     page = None                     # 当前 page
 
     PROFILE_BASE = str(BASE_DIR / "edge_doubao_profiles")  # 所有账号的 profile 放这
     os.makedirs(PROFILE_BASE, exist_ok=True)
 
-    def _open_browser(profile_dir):
-        """打开指定 profile 目录的浏览器。换号时会被调用。"""
-        nonlocal playwright_instance, browser, page
-        # 先确保旧的浏览器关了
+    def _open_browser(profile_dir, account_id=None, worker_id=None):
+        """打开浏览器。换号时会被调用。"""
+        nonlocal playwright_instance, _pw_browser, browser, page
+        # 先确保旧的浏览器关了（先关 Context，再关 Browser，最后停 Playwright）
         if browser is not None:
             try:
                 browser.close()
+            except Exception:
+                pass
+        if _pw_browser is not None:
+            try:
+                _pw_browser.close()
             except Exception:
                 pass
         if playwright_instance is not None:
@@ -722,12 +730,18 @@ def main():
                 pass
 
         log(f"打开浏览器，profile 目录: {profile_dir}")
+
         playwright_instance = sync_playwright().start()
-        browser = playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
+
+        # ===== 彻底弃用 launch_persistent_context，改用临时 Browser + Context =====
+        # 根因：persistent context 会加载 Edge 加密 SQLite 里的 cookie（DPAPI 加密，
+        # 和 Windows 用户绑定，跨机器完全不兼容），和我们 add_cookies 注入的 cookie
+        # 永远在打架。改成临时 context 后，登录态唯一来源就是 state.json，
+        # 而且直接在 new_context(storage_state=...) 时让 Playwright 一次性注入
+        # cookie + localStorage + sessionStorage，豆包做双重验证也能通过。
+        _pw_browser = playwright_instance.chromium.launch(
             channel="msedge",
             headless=False,
-            no_viewport=True,
             args=[
                 "--start-maximized",
                 "--disable-blink-features=AutomationControlled",
@@ -737,7 +751,19 @@ def main():
             ]
         )
 
-        # 注入反检测脚本（同旧版）
+        # ===== 关键：new_context 时直接传 storage_state，Playwright 自动注入
+        # cookie + localStorage + sessionStorage，一次搞定登录态 =====
+        _state_path = os.path.join(profile_dir, "state.json")
+        _ctx_kwargs = {"no_viewport": True}
+        if os.path.exists(_state_path):
+            _ctx_kwargs["storage_state"] = _state_path
+            log(f"检测到 state.json，new_context 时自动注入完整登录态")
+        else:
+            log("注意：没有 state.json，启动后需要手动登录")
+
+        browser = _pw_browser.new_context(**_ctx_kwargs)
+
+        # 注入反检测脚本
         browser.add_init_script(
             """
             () => {
@@ -769,29 +795,45 @@ def main():
             """
         )
 
-        if browser.pages:
-            page = browser.pages[0]
-        else:
-            page = browser.new_page()
+        # ===== storage_state 已在 new_context 时注入完毕，不需要额外 import =====
 
+        page = browser.new_page()
         page.goto(URL, wait_until="domcontentloaded")
         log("豆包已打开")
         human_wait(2, 5)
 
-        # 等用户确认登录完成（第一次用新 profile 时一定要手动登录！）
+        # 等用户确认登录完成
         ready(page)
+
+        # ===== 导出最新完整登录态（cookie + localStorage），写本地 + 推后端 =====
+        _state_file = export_state(browser, profile_dir)
+
+        if account_id is not None and worker_id is not None and _state_file:
+            try:
+                with open(_state_file, "r", encoding="utf-8") as f:
+                    state_json_str = f.read()
+                upload_account_cookies(account_id, worker_id, state_json_str)
+            except Exception as e:
+                log(f"读取/上传 state.json 失败（不影响本次工作）: {e}")
+
         log("已登录，可以开始工作了")
         human_wait(1, 3)
 
     def _close_browser():
         """关闭当前浏览器。换号/退出时会被调用。"""
-        nonlocal playwright_instance, browser, page
+        nonlocal playwright_instance, _pw_browser, browser, page
         if browser is not None:
             try:
                 browser.close()
             except Exception as e:
-                log(f"关闭浏览器异常: {e}")
+                log(f"关闭 BrowserContext 异常: {e}")
             browser = None
+        if _pw_browser is not None:
+            try:
+                _pw_browser.close()
+            except Exception as e:
+                log(f"关闭 Browser 异常: {e}")
+            _pw_browser = None
         if playwright_instance is not None:
             try:
                 playwright_instance.stop()

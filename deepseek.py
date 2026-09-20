@@ -42,11 +42,13 @@ from worker_lib import (
     upload_screenshot as worker_upload,
     run_worker_loop,
     callback as worker_callback,
+    import_state,
+    export_state,
+    upload_account_cookies,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCREENSHOT_DIR = os.path.join(BASE_DIR, "screenshots")
-EDGE_PROFILE = os.path.join(BASE_DIR, "edge_profile")
 
 PLATFORM_NAME = "deepseek"
 
@@ -894,36 +896,52 @@ def main():
     log("注意：第一次使用某个账号时，需要在浏览器里手动登录一次，之后 cookie 会自动复用")
 
     playwright_instance = None
+    _pw_browser = None
     browser = None
     page = None
 
-    PROFILE_BASE = os.path.join(BASE_DIR, "edge_profiles")  # 所有账号的 profile 放这
+    PROFILE_BASE = os.path.join(BASE_DIR, "edge_deepseek_profiles")
     os.makedirs(PROFILE_BASE, exist_ok=True)
 
-    def _open_browser(profile_dir):
-        nonlocal playwright_instance, browser, page
-        # 先关旧的
+    def _open_browser(profile_dir, account_id=None, worker_id=None):
+        nonlocal playwright_instance, _pw_browser, browser, page
         if browser is not None:
             try: browser.close()
             except Exception: pass
+            browser = None
+        if _pw_browser is not None:
+            try: _pw_browser.close()
+            except Exception: pass
+            _pw_browser = None
         if playwright_instance is not None:
             try: playwright_instance.stop()
             except Exception: pass
+            playwright_instance = None
 
         log(f"打开浏览器，profile 目录: {profile_dir}")
         playwright_instance = sync_playwright().start()
-        browser = playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
+
+        _pw_browser = playwright_instance.chromium.launch(
             channel="msedge",
             headless=False,
-            viewport={"width": 1920, "height": 6000},
             args=[
+                "--start-maximized",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
                 "--disable-extensions",
                 "--disable-features=IsolateOrigins,site-per-process"
             ]
         )
+
+        _state_path = os.path.join(profile_dir, "state.json")
+        _ctx_kwargs = {"no_viewport": True}
+        if os.path.exists(_state_path):
+            _ctx_kwargs["storage_state"] = _state_path
+            log(f"检测到 state.json，new_context 时自动注入完整登录态")
+        else:
+            log("注意：没有 state.json，启动后需要手动登录")
+
+        browser = _pw_browser.new_context(**_ctx_kwargs)
         browser.add_init_script(
             """
             () => {
@@ -939,7 +957,7 @@ def main():
             }
             """
         )
-        page = browser.pages[0] if browser.pages else browser.new_page()
+        page = browser.new_page()
         page.goto("https://chat.deepseek.com", wait_until="domcontentloaded")
         log("DeepSeek 已打开")
         human_wait(2, 5)
@@ -949,12 +967,25 @@ def main():
             log("已登录")
         human_wait(1, 3)
 
+        _state_file = export_state(browser, profile_dir)
+        if account_id is not None and worker_id is not None and _state_file:
+            try:
+                with open(_state_file, "r", encoding="utf-8") as f:
+                    state_json_str = f.read()
+                upload_account_cookies(account_id, worker_id, state_json_str)
+            except Exception as e:
+                log(f"读取/上传 state.json 失败（不影响本次工作）: {e}")
+
     def _close_browser():
-        nonlocal playwright_instance, browser, page
+        nonlocal playwright_instance, _pw_browser, browser, page
         if browser is not None:
             try: browser.close()
-            except Exception as e: log(f"关闭浏览器异常: {e}")
+            except Exception as e: log(f"关闭 BrowserContext 异常: {e}")
             browser = None
+        if _pw_browser is not None:
+            try: _pw_browser.close()
+            except Exception as e: log(f"关闭 Browser 异常: {e}")
+            _pw_browser = None
         if playwright_instance is not None:
             try: playwright_instance.stop()
             except Exception as e: log(f"停止 playwright 异常: {e}")

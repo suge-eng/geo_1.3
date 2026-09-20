@@ -139,4 +139,13 @@ public interface AiAccountMapper extends BaseMapper<AiAccount> {
     @Update("UPDATE ai_account SET status = 'ACTIVE' " +
             "WHERE status = 'EXHAUSTED' AND (daily_limit IS NULL OR daily_limit <= 0 OR daily_used < daily_limit)")
     int recoverExhaustedAccounts();
+
+    /**
+     * 【worker/手动登录脚本上传 cookie】把 cookie JSON 存到账号记录。
+     * 只按 accountId 更新——cookie 属于账号本身，无论账号当前是否被借走、
+     * 被哪个 worker 持有，都允许上传最新 cookie（谁登录/刷新谁的 cookie 就最新）。
+     */
+    @Update("UPDATE ai_account SET cookie = #{cookie} WHERE id = #{accountId}")
+    int updateCookie(@Param("accountId") Long accountId,
+                     @Param("cookie") String cookie);
 }
