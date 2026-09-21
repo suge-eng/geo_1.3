@@ -934,7 +934,9 @@ def main():
         )
 
         _state_path = os.path.join(profile_dir, "state.json")
-        _ctx_kwargs = {"no_viewport": True}
+           # ===== 大视口：让虚拟滚动页面尽可能多的渲染内容到 DOM =====
+        # 固定 1280×6000 的视口 → 浏览器会渲染 6000px 高的内容 → full_page 截图才能截全
+        _ctx_kwargs = {"viewport": {"width": 1280, "height": 6000}}
         if os.path.exists(_state_path):
             _ctx_kwargs["storage_state"] = _state_path
             log(f"检测到 state.json，new_context 时自动注入完整登录态")

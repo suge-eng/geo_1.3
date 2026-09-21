@@ -46,7 +46,7 @@ from worker_lib import (
 BASE_DIR = Path(__file__).resolve().parent
 SCREENSHOT_DIR = BASE_DIR / "yuanbao_screenshots"
 
-PLATFORM_NAME = "yuanbao"
+PLATFORM_NAME = "tencent"
 
 URL = "https://yuanbao.tencent.com/chat/naQivTmsDa"
 
